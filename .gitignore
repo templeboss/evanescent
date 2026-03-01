@@ -1,0 +1,23 @@
+# Rust
+backend/target/
+**/*.rs.bk
+
+# Android
+android/.gradle/
+android/local.properties
+android/app/build/
+android/.idea/
+*.iml
+
+# Generated proto code
+backend/src/proto/
+android/app/src/main/java/net/evanescent/proto/
+
+# Secrets / config
+*.env
+provider.toml
+config.toml
+
+# OS
+.DS_Store
+Thumbs.db
