@@ -1,0 +1,24 @@
+syntax = "proto3";
+package evanescent.v1;
+
+option go_package = "github.com/evanescent/evanescent/backend/internal/proto";
+
+// Never transmitted. Stored in SQLCipher on Android only.
+message RatchetState {
+  bytes  dh_self_public   = 1;  // Current DH ratchet keypair (public), X25519, 32 bytes
+  bytes  dh_self_private  = 2;  // Current DH ratchet keypair (private), X25519, 32 bytes
+  bytes  dh_remote_public = 3;  // Remote's current ratchet public key, 32 bytes
+  bytes  root_key         = 4;  // Current root key, 32 bytes
+  bytes  chain_key_send   = 5;  // Sending chain key, 32 bytes
+  bytes  chain_key_recv   = 6;  // Receiving chain key, 32 bytes
+  uint32 send_count       = 7;  // N_s: messages sent in current chain
+  uint32 recv_count       = 8;  // N_r: messages received in current chain
+  uint32 prev_send_count  = 9;  // PN: messages in previous sending chain
+  repeated SkippedKey skipped_keys = 10;
+}
+
+message SkippedKey {
+  bytes  dh_public       = 1;  // Ratchet public key this skip key belongs to
+  uint32 message_counter = 2;  // Message counter for this skip key
+  bytes  message_key     = 3;  // The skip key itself, 32 bytes
+}

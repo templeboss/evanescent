@@ -1,0 +1,45 @@
+[package]
+name = "evanescent-provider"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Nym — native SDK, no subprocess
+nym-sdk = { git = "https://github.com/nymtech/nym", branch = "master" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# WebSocket server (Android connections)
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+futures = "0.3"
+
+# SQLite — use the same sqlx that nym-sdk pulls in (avoids libsqlite3-sys links conflict)
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-native-tls"] }
+
+# Proto serialization (generated from proto/*.proto)
+prost = "0.12"
+
+# Config
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Crypto
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+blake3 = "1"
+hex = "0.4"
+rand = "0.8"
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+bytes = "1"
+tokio-util = { version = "0.7", features = ["codec"] }
+
+[build-dependencies]
+prost-build = "0.12"

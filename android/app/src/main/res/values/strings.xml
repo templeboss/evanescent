@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Evanescent</string>
+    <string name="notification_channel_id">evanescent_connection</string>
+    <string name="notification_channel_name">Connection</string>
+    <string name="notification_title">Evanescent</string>
+    <string name="notification_text">Maintaining secure connection</string>
+    <string name="orbot_not_installed">Orbot is required for secure communication. Please install it from F-Droid.</string>
+    <string name="orbot_not_running">Starting Orbot…</string>
+    <string name="install_orbot">Install Orbot</string>
+    <string name="conversations">Conversations</string>
+    <string name="add_contact">Add Contact</string>
+    <string name="settings">Settings</string>
+    <string name="send">Send</string>
+    <string name="message_hint">Message</string>
+    <string name="safety_number">Safety Number</string>
+    <string name="verified">Verified</string>
+    <string name="provider_address">Provider Address</string>
+</resources>

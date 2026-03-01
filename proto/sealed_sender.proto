@@ -1,0 +1,19 @@
+syntax = "proto3";
+package evanescent.v1;
+
+option go_package = "github.com/evanescent/evanescent/backend/internal/proto";
+
+// Outer envelope: stored by provider, routed via Nym.
+// Provider cannot decrypt this.
+message SealedEnvelope {
+  bytes ephemeral_key = 1;  // X25519 pubkey, 32 bytes (EPK_pub)
+  bytes nonce         = 2;  // ChaCha20-Poly1305 nonce, 12 bytes
+  bytes ciphertext    = 3;  // encrypted SealedSenderContent || 16-byte Poly1305 tag
+}
+
+// Inner content: decrypted by recipient's device only
+message SealedSenderContent {
+  bytes  sender_identity_key = 1;  // Ed25519 pubkey, 32 bytes
+  string sender_nym_address  = 2;  // sender provider's Nym address (for reply routing)
+  bytes  dr_message          = 3;  // serialised DrMessage proto bytes
+}
