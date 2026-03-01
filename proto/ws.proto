@@ -1,0 +1,91 @@
+syntax = "proto3";
+package evanescent.v1;
+
+option go_package = "github.com/evanescent/evanescent/backend/internal/proto";
+
+import "prekeys.proto";
+
+// Android → Provider
+message WsClientMessage {
+  oneof body {
+    AuthChallengeRequest auth_challenge_request = 1;
+    AuthResponse         auth_response          = 2;
+    UploadPreKeys        upload_pre_keys        = 3;
+    FetchMessages        fetch_messages         = 4;
+    SendMessage          send_message           = 5;
+    Ping                 ping                   = 6;
+  }
+}
+
+// Provider → Android
+message WsServerMessage {
+  oneof body {
+    AuthChallenge auth_challenge = 1;
+    AuthOk        auth_ok        = 2;
+    Messages      messages       = 3;
+    SendAck       send_ack       = 4;
+    Pong          pong           = 5;
+    Error         error          = 6;
+    ProviderInfo  provider_info  = 7;
+  }
+}
+
+message AuthChallengeRequest {}
+
+message AuthChallenge {
+  bytes nonce = 1;  // 32 random bytes
+}
+
+message AuthResponse {
+  bytes identity_key = 1;  // Ed25519 pubkey, 32 bytes
+  bytes signature    = 2;  // Ed25519 signature over ("Evanescent_Auth_v1" || nonce), 64 bytes
+}
+
+message AuthOk {
+  bytes session_token = 1;  // opaque 32 bytes, reserved for future use
+}
+
+message UploadPreKeys {
+  repeated SignedPreKey  signed_prekeys   = 1;
+  repeated OneTimePreKey one_time_prekeys = 2;
+}
+
+message FetchMessages {
+  repeated string ack_ids = 1;  // UUIDs of messages to acknowledge and delete
+}
+
+message SendMessage {
+  string correlation_id  = 1;  // UUID v4, for matching SendAck
+  string to_nym_address  = 2;  // recipient provider's Nym address
+  bytes  sealed_envelope = 3;  // serialised SealedEnvelope proto bytes
+}
+
+message Messages {
+  repeated StoredMessage items = 1;
+}
+
+message StoredMessage {
+  string id              = 1;  // UUID v4
+  bytes  sealed_envelope = 2;  // serialised SealedEnvelope proto bytes
+  int64  received_at     = 3;  // Unix milliseconds
+}
+
+message SendAck {
+  string correlation_id = 1;
+  bool   ok             = 2;
+  string error_code     = 3;  // present only if !ok; see standards.md §14 for valid values
+}
+
+message Ping {}
+message Pong {}
+
+message Error {
+  string code    = 1;
+  string message = 2;
+}
+
+// Sent once immediately after AuthOk so the Android client knows where to direct Nym messages.
+message ProviderInfo {
+  string nym_address   = 1;  // provider's Nym address
+  string onion_address = 2;  // provider's .onion address (v3)
+}

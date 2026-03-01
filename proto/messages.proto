@@ -1,0 +1,23 @@
+syntax = "proto3";
+package evanescent.v1;
+
+option go_package = "github.com/evanescent/evanescent/backend/internal/proto";
+
+message MessageHeader {
+  bytes  dh_ratchet_key   = 1;  // X25519 pubkey, 32 bytes (sender's current ratchet key)
+  uint32 previous_counter = 2;  // PN: messages in previous chain
+  uint32 message_counter  = 3;  // N: message number in current chain
+}
+
+// A complete Double Ratchet encrypted message
+message DrMessage {
+  bytes message_header = 1;  // serialised MessageHeader (used as AAD for AEAD)
+  bytes ciphertext     = 2;  // ChaCha20-Poly1305 ciphertext || 16-byte tag
+}
+
+// Application-level message content (plaintext before Double Ratchet encryption)
+message MessageContent {
+  string text       = 1;
+  int64  sent_at    = 2;  // Unix milliseconds, set by sender
+  string message_id = 3;  // UUID v4
+}

@@ -1,0 +1,29 @@
+syntax = "proto3";
+package evanescent.v1;
+
+option go_package = "github.com/evanescent/evanescent/backend/internal/proto";
+
+message PreKeyBundle {
+  bytes  identity_key       = 1;  // Ed25519 pubkey, 32 bytes
+  uint32 signed_prekey_id   = 2;
+  bytes  signed_prekey      = 3;  // X25519 pubkey, 32 bytes
+  bytes  signed_prekey_sig  = 4;  // Ed25519 signature, 64 bytes
+  uint32 one_time_prekey_id = 5;  // absent (0) if exhausted
+  bytes  one_time_prekey    = 6;  // X25519 pubkey, 32 bytes; absent if exhausted
+}
+
+message SignedPreKey {
+  uint32 prekey_id  = 1;
+  bytes  public_key = 2;  // X25519 pubkey, 32 bytes
+  bytes  signature  = 3;  // Ed25519 signature over ("Evanescent_SPK_v1" || public_key), 64 bytes
+}
+
+message OneTimePreKey {
+  uint32 prekey_id  = 1;
+  bytes  public_key = 2;  // X25519 pubkey, 32 bytes
+}
+
+// Sent via Nym from requester to provider to request a prekey bundle
+message PreKeyRequest {
+  bytes reply_nym_address = 1;  // Nym address to send the PreKeyBundle response to
+}
