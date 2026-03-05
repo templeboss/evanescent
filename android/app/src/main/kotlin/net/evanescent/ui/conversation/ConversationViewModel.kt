@@ -63,7 +63,9 @@ class ConversationViewModel(
                     senderNymAddress = senderNymAddr
                 )
 
-                val errCode = appInstance.providerClient.send(contactEntity.nymAddress, envelopeBytes)
+                val toMailboxAddr = contactEntity.mailboxAddr
+                    ?: throw IllegalStateException("Contact has no mailbox address — re-add this contact")
+                val errCode = appInstance.providerClient.send(contactEntity.nymAddress, toMailboxAddr, envelopeBytes)
                 val ok = errCode == null
 
                 if (ok) {
@@ -135,14 +137,27 @@ class ConversationViewModel(
         check(myProviderNymAddr.isNotEmpty()) {
             "Provider Nym address not yet known — wait for connection"
         }
+        val myMailboxAddr = appInstance.myMailboxAddr
+        check(myMailboxAddr.size == 32) { "My mailbox address not yet known — wait for connection" }
+        val targetMailboxAddr = contact.mailboxAddr
+            ?: throw IllegalStateException("Contact has no mailbox address — re-add this contact")
 
-        // Encode PreKeyRequest proto: field 1 = bytes reply_nym_address
-        val replyAddrBytes = myProviderNymAddr.toByteArray(Charsets.UTF_8)
-        val protoBytes = encodeBytes(1, replyAddrBytes)
-        val prefixed = byteArrayOf(0x01.toByte()) + protoBytes
+        // Encode PreKeyRequest proto:
+        //   field 1 = reply_nym_address (our provider's Nym address)
+        //   field 2 = target_mailbox_addr (whose prekeys we want)
+        //   field 3 = reply_mailbox_addr (our mailbox — where to store the bundle response)
+        val protoBytes = encodeBytes(1, myProviderNymAddr.toByteArray(Charsets.UTF_8)) +
+            encodeBytes(2, targetMailboxAddr) +
+            encodeBytes(3, myMailboxAddr)
 
-        // Send to recipient's provider Nym address via our provider.
-        val sendErr = appInstance.providerClient.send(contact.nymAddress, prefixed)
+        // Send via our provider with PREFIX_PREKEY_REQUEST (0x01) so the recipient's
+        // backend handles it as a prekey lookup, not as a mailbox message.
+        val sendErr = appInstance.providerClient.send(
+            toNymAddress = contact.nymAddress,
+            toMailboxAddr = targetMailboxAddr,
+            sealedEnvelope = protoBytes,
+            nymPrefix = 0x01
+        )
         check(sendErr == null) { "Failed to send PreKeyRequest to ${contact.nymAddress}: $sendErr" }
 
         // Wait for the PreKeyBundle to arrive in our mailbox (via App.prekeyBundleFlow).

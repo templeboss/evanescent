@@ -44,6 +44,10 @@ class App : Application() {
     @Volatile var providerOnionAddr: String = ""
         private set
 
+    /** This user's own mailbox address — 32 raw bytes — delivered via ProviderInfo after auth. */
+    @Volatile var myMailboxAddr: ByteArray = byteArrayOf()
+        private set
+
     /**
      * Emits (senderIdentityKey, PreKeyBundle proto bytes) when a prekey bundle
      * arrives in the mailbox. ConversationViewModel awaits this to establish sessions.
@@ -83,9 +87,10 @@ class App : Application() {
             onEnvelopeReceived = { id, envelope ->
                 handleIncomingEnvelope(id, envelope)
             },
-            onProviderInfo = { nymAddr, onionAddr ->
+            onProviderInfo = { nymAddr, onionAddr, mailboxAddr ->
                 providerNymAddr = nymAddr
                 providerOnionAddr = onionAddr
+                myMailboxAddr = mailboxAddr
                 Log.d(TAG, "Provider Nym address: $nymAddr")
             },
             onAuthenticated = {

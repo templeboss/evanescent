@@ -105,6 +105,7 @@ class AddContactViewModel(app: Application) : AndroidViewModel(app) {
                 val bundle = parseContactBundle(bytes)
                 db.contactDao().upsert(ContactEntity(
                     identityKey = bundle.identityKey,
+                    mailboxAddr = bundle.mailboxAddr,
                     nymAddress = bundle.nymAddress,
                     providerOnion = bundle.providerOnion,
                     alias = alias.ifBlank { bundle.nymAddress.take(16) }
@@ -118,6 +119,7 @@ class AddContactViewModel(app: Application) : AndroidViewModel(app) {
 
     private data class ContactBundle(
         val identityKey: ByteArray,
+        val mailboxAddr: ByteArray,
         val nymAddress: String,
         val providerOnion: String,
         val version: Int
@@ -126,6 +128,7 @@ class AddContactViewModel(app: Application) : AndroidViewModel(app) {
     private fun parseContactBundle(bytes: ByteArray): ContactBundle {
         var pos = 0
         var identityKey = byteArrayOf()
+        var mailboxAddr = byteArrayOf()
         var nymAddress = ""
         var providerOnion = ""
         var version = 0
@@ -139,18 +142,20 @@ class AddContactViewModel(app: Application) : AndroidViewModel(app) {
                 val v = bytes.copyOfRange(pos, pos + len.toInt()); pos += len.toInt()
                 when (fieldNum) {
                     1 -> identityKey = v
-                    2 -> nymAddress = String(v, Charsets.UTF_8)
-                    3 -> providerOnion = String(v, Charsets.UTF_8)
+                    2 -> mailboxAddr = v
+                    3 -> nymAddress = String(v, Charsets.UTF_8)
+                    4 -> providerOnion = String(v, Charsets.UTF_8)
                 }
             } else if (wireType == 0) {
                 val (v, n2) = readVarint(bytes, pos); pos += n2
-                if (fieldNum == 4) version = v.toInt()
+                if (fieldNum == 5) version = v.toInt()
             } else {
                 pos += skipField(bytes, pos, wireType)
             }
         }
         require(identityKey.size == 32) { "Invalid identity key" }
-        return ContactBundle(identityKey, nymAddress, providerOnion, version)
+        require(mailboxAddr.size == 32) { "Invalid mailbox address" }
+        return ContactBundle(identityKey, mailboxAddr, nymAddress, providerOnion, version)
     }
 
     private fun readVarint(data: ByteArray, start: Int): Pair<Long, Int> {

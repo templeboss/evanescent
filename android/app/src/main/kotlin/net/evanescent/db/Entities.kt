@@ -12,7 +12,9 @@ data class ContactEntity(
     @ColumnInfo(name = "nym_address") val nymAddress: String,
     @ColumnInfo(name = "provider_onion") val providerOnion: String,
     val alias: String,
-    val verified: Int = 0  // 0 = false, 1 = true
+    val verified: Int = 0,  // 0 = false, 1 = true
+    @ColumnInfo(name = "mailbox_addr", typeAffinity = androidx.room.ColumnInfo.BLOB)
+    val mailboxAddr: ByteArray? = null  // 32 raw bytes (BLAKE3 of identity_key); null for legacy contacts
 ) {
     override fun equals(other: Any?): Boolean {
         if (other !is ContactEntity) return false
