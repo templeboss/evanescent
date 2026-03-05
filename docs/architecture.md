@@ -24,21 +24,22 @@ The only user interface. Holds the user's identity keypair. Performs all encrypt
 - **Transport**: All connections routed through Orbot (Tor SOCKS5 proxy on 127.0.0.1:9050). No direct internet connections.
 - **Provider connection**: WebSocket to the Personal Provider's `.onion` address.
 
-### 2. Personal Provider
+### 2. Provider (Shared / Federated)
 
-A Go server run by or on behalf of the user. It is the user's permanent presence on the Nym network.
+A Rust server that may host any number of users. It is each user's permanent presence on the Nym network. Users install only the Android APK and connect to a provider of their choice; no server of their own is required.
 
-The Android app is ephemeral (offline, battery-constrained). The provider is persistent.
+**Default provider**: Evanescent ships with a default provider address. Users can switch to any compatible provider at setup time.
+
+**Self-hosting**: Operators can run a provider on any Linux VPS or Raspberry Pi. A Docker Compose configuration is provided. The default provider is operated by the Evanescent project.
 
 **Responsibilities:**
-- Runs `nym-client` sidecar, maintaining a permanent Nym network connection
-- Generates continuous cover traffic (loop + drop messages at Poisson rate) — independent of whether the Android app is connected
-- Receives messages via Nym, stores encrypted blobs for offline delivery to Android
-- Serves X3DH prekey bundles to requesters (via Nym or via `.onion` fallback)
-- Exposes a Tor hidden service (`.onion`) for Android to connect to
-- Knows nothing useful: sees only ciphertext, sees Tor exit node IPs (not user's real IP)
-
-**Self-hosting**: The provider is designed to be self-hosted on any Linux VPS or Raspberry Pi. A Docker Compose configuration is provided.
+- Connects to the Nym mix-net via the native Rust SDK, maintaining a permanent Nym network connection with a single shared Nym address for all hosted users
+- Cover traffic (loop + drop messages at Loopix rate) runs continuously on the server, independent of whether any Android client is connected
+- Routes inbound Nym messages to the correct user mailbox using the 32-byte routing tag embedded in every message
+- Stores encrypted blobs for offline delivery to Android
+- Serves X3DH prekey bundles to requesters (via Nym)
+- Exposes a Tor hidden service (`.onion`) for Android connections
+- Knows only: which mailboxes received messages (count, timing) — never plaintext, never sender identity
 
 ### 3. Nym Mix-Net
 
@@ -60,11 +61,11 @@ Alice's Android
   │
   │ WebSocket over Tor (SOCKS5 via Orbot)
   ▼
-Alice's Personal Provider (.onion)
-  │ manages nym-client subprocess
-  │ continuously generates cover traffic
+Alice's Provider (.onion)          ← shared, may host many users
+  │ nym-sdk native client
+  │ continuously generates cover traffic for all users
   │
-  │ Sphinx packets via nym-client
+  │ [0x05][bob_mailbox_tag][SealedEnvelope]  (Sphinx via Nym SDK)
   ▼
 Nym Mix-Net
   [Layer 1: Mix nodes]
@@ -72,7 +73,8 @@ Nym Mix-Net
   [Layer 3: Mix nodes]
   │
   ▼
-Bob's Personal Provider (reached via Bob's Nym address)
+Bob's Provider (reached via provider's Nym address)
+  │ routes to Bob's mailbox using the 32-byte routing tag
   │ stores encrypted blob
   │
   │ WebSocket over Tor
@@ -129,8 +131,8 @@ Three independent layers. Each can be compromised independently without exposing
    c. App sends SealedEnvelope to provider via WebSocket
 
 5. Provider receives SealedEnvelope:
-   - Wraps in Nym message, addressed to Bob's Nym address
-   - Passes to nym-client for Sphinx wrapping and routing
+   - Wraps in Nym message: [0x05][bob_mailbox_addr_32B][SealedEnvelope]
+   - Sends to Bob's provider's Nym address via the SDK
    - Returns SendAck to Android
 
 6. Nym mix-net routes the message through L layers.
@@ -181,13 +183,16 @@ Users share a `ContactBundle` out-of-band (QR code, secure link):
 ```
 ContactBundle {
   identity_key:    <Ed25519 pubkey, 32 bytes>
-  nym_address:     <provider's Nym address>
-  provider_onion:  <provider's .onion address>
+  mailbox_addr:    <BLAKE3(identity_key)[0:32], 32 bytes>  ← routing tag on the wire
+  nym_address:     <recipient provider's Nym address>       ← where to send Nym messages
+  provider_onion:  <recipient provider's .onion address>    ← shared by all users on that provider
   version:         1
 }
 ```
 
 Encoded as base64url (no padding) for QR codes.
+
+**Note**: `nym_address` and `provider_onion` identify the provider, not the individual user. `mailbox_addr` identifies the user within the provider and is used as the routing tag on all Nym messages.
 
 ### Safety Numbers
 
@@ -200,54 +205,42 @@ Displayed as: 5 groups of 6 decimal digits
 
 ---
 
-## Provider Architecture (Go)
+## Provider Architecture (Rust)
 
 ```
-cmd/provider/main.go
-  └── starts all subsystems, manages lifecycle
+backend/src/
+  main.rs        Startup, inbound Nym message router
+  config.rs      YAML config (nym data dir, Tor ports, DB path, log level)
 
-internal/
-  nym/         Nym client sidecar management
-               - spawns/monitors nym-client subprocess
-               - WebSocket connection to nym-client (:1977)
-               - send/receive message routing
+  nym_client.rs  Nym SDK integration (native Rust)
+                 - MixnetClientBuilder → persistent on-disk keys
+                 - shared Nym address for all hosted users
+                 - cover traffic handled automatically by Loopix (SDK)
+                 - wire format: [prefix 1B][routing_tag 32B][payload]
 
-  cover/       Cover traffic engine
-               - loop message generator (Poisson λ=1/60s)
-               - drop message generator (Poisson λ=1/120s)
-               - independent of user activity
+  mailbox.rs     Offline message store
+                 - SQLite via sqlx
+                 - stores SealedEnvelope bytes + metadata per mailbox_addr
+                 - 30-day TTL enforcement
 
-  mailbox/     Offline message store
-               - SQLite via modernc.org/sqlite
-               - stores SealedEnvelope bytes + metadata
-               - 30-day TTL enforcement
+  prekeys.rs     X3DH prekey management
+                 - stores signed prekeys and one-time prekeys per mailbox_addr
+                 - serves PreKeyBundle on Nym prekey requests
 
-  prekeys/     X3DH prekey management
-               - stores signed prekeys and one-time prekeys
-               - serves PreKeyBundle on request
-               - replenishment tracking
+  onion.rs       Tor hidden service
+                 - raw Tor control protocol
+                 - creates and maintains .onion address
 
-  onion/       Tor hidden service
-               - manages Tor via control port (bine library)
-               - creates and maintains .onion address
+  store.rs       SQLite schema (idempotent CREATE IF NOT EXISTS)
 
-  ws/          WebSocket server
-               - challenge-response authentication
-               - client message routing
-               - session management
+  crypto.rs      Ed25519 auth + SPK signature verification, mailbox_addr derivation
 
-  crypto/      Cryptographic utilities
-               - Ed25519 signature verification
-               - X25519 key validation
-               - PreKeyBundle validation
-
-  store/       SQLite schema and migrations
-
-config/        Provider configuration
-               - YAML config file
-               - Nym gateway selection
-               - Tor control port settings
-               - Cover traffic rate overrides (for testing only)
+  ws/
+    mod.rs       axum WebSocket router, AppState
+    auth.rs      Challenge-response auth, mailbox auto-registration on first connect
+    handler.rs   FetchMessages, SendMessage (→ Nym), UploadPreKeys
+    session.rs   Per-connection state + rate limiting
+    errors.rs    Error code constants
 ```
 
 ---

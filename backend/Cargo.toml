@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Nym — native SDK, no subprocess
-nym-sdk = { git = "https://github.com/nymtech/nym", branch = "master" }
+nym-sdk = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v2026.4-quark" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -43,3 +43,4 @@ tokio-util = { version = "0.7", features = ["codec"] }
 
 [build-dependencies]
 prost-build = "0.12"
+protoc-bin-vendored = "3"

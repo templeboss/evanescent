@@ -10,7 +10,7 @@ mod ws;
 
 use anyhow::{Context, Result};
 use mailbox::MailboxStore;
-use nym_client::{InboundKind, NymHandle, PREFIX_PREKEY_BUNDLE};
+use nym_client::{InboundKind, NymHandle, PREFIX_PREKEY_BUNDLE, ROUTING_TAG_LEN};
 use prekeys::PrekeyStore;
 use prost::Message as ProstMessage;
 use std::{path::Path, sync::Arc};
@@ -59,7 +59,6 @@ async fn main() -> Result<()> {
     info!("nym address: {}", nym.nym_addr);
 
     // ── Tor hidden service ────────────────────────────────────────────────────
-    // Key path sits next to the database so it is included in the backup.
     let onion_key_path = Path::new(&cfg.storage.db_path)
         .with_file_name("onion.key");
     let onion_addr = onion::start_hidden_service(
@@ -116,6 +115,9 @@ async fn main() -> Result<()> {
 }
 
 /// Route messages arriving from Nym to the appropriate handler.
+///
+/// The `routing_tag` in each InboundMessage is the 32 raw bytes of the
+/// target mailbox address (hex-encoded in the DB).
 async fn route_inbound(
     rx: &mut mpsc::Receiver<nym_client::InboundMessage>,
     mailbox: &MailboxStore,
@@ -123,62 +125,40 @@ async fn route_inbound(
     nym: &NymHandle,
 ) {
     while let Some(msg) = rx.recv().await {
+        let mailbox_addr = hex::encode(msg.routing_tag);
         match msg.kind {
             InboundKind::PrekeyRequest => {
-                // payload[0] = 0x01 prefix; payload[1..] = PreKeyRequest proto bytes.
-                let proto_bytes = &msg.payload[1..];
-                handle_prekey_request(proto_bytes, mailbox, prekeys, nym).await;
+                // payload = PreKeyRequest proto bytes (padding stripped by nym_client).
+                handle_prekey_request(&msg.payload, &mailbox_addr, mailbox, prekeys, nym).await;
             }
             InboundKind::PrekeyBundleResponse => {
-                // payload[0] = 0x04 prefix; payload[1..] = PreKeyBundle proto bytes.
-                // Store in the local mailbox with a "pkb." id so the Android
-                // client can distinguish it from sealed envelopes.
-                let proto_bytes = &msg.payload[1..];
-                let addr = match mailbox.first_mailbox_addr().await {
-                    Ok(Some(a)) => a,
-                    Ok(None) => {
-                        warn!("nym: received prekey bundle but no mailbox registered");
-                        continue;
-                    }
-                    Err(e) => {
-                        error!("nym: first_mailbox_addr: {e}");
-                        continue;
-                    }
-                };
+                // routing_tag = the requester's mailbox address.
+                // Store so the Android client can pick it up on next fetch.
                 let id = format!("pkb.{}", Uuid::new_v4());
-                if let Err(e) = mailbox.store_message(&id, &addr, proto_bytes).await {
-                    error!("nym: store prekey bundle: {e}");
+                if let Err(e) = mailbox.store_message(&id, &mailbox_addr, &msg.payload).await {
+                    error!("nym: store prekey bundle response for {mailbox_addr}: {e}");
                 }
             }
             InboundKind::MailboxMessage => {
-                let addr = match mailbox.first_mailbox_addr().await {
-                    Ok(Some(a)) => a,
-                    Ok(None) => {
-                        warn!("nym: received message but no mailbox registered");
-                        continue;
-                    }
-                    Err(e) => {
-                        error!("nym: first_mailbox_addr: {e}");
-                        continue;
-                    }
-                };
+                // routing_tag = the recipient's mailbox address.
                 let id = Uuid::new_v4().to_string();
-                if let Err(e) = mailbox.store_message(&id, &addr, &msg.payload).await {
-                    error!("nym: store_message: {e}");
+                if let Err(e) = mailbox.store_message(&id, &mailbox_addr, &msg.payload).await {
+                    error!("nym: store_message for {mailbox_addr}: {e}");
                 }
             }
         }
     }
 }
 
-/// Handle an inbound PreKeyRequest: look up the prekey bundle and send it back.
+/// Handle an inbound PreKeyRequest: look up the target user's prekey bundle and
+/// send it back to the requester's provider via Nym.
 async fn handle_prekey_request(
     proto_bytes: &[u8],
+    target_mailbox_addr: &str,
     mailbox: &MailboxStore,
     prekeys: &PrekeyStore,
     nym: &NymHandle,
 ) {
-    // Parse PreKeyRequest proto (field 1: bytes reply_nym_address).
     let request = match proto::PreKeyRequest::decode(proto_bytes) {
         Ok(r) => r,
         Err(e) => {
@@ -195,55 +175,51 @@ async fn handle_prekey_request(
         }
     };
 
-    // For a single-user provider the first (and only) mailbox is the user's.
-    let mailbox_addr = match mailbox.first_mailbox_addr().await {
-        Ok(Some(a)) => a,
-        Ok(None) => {
-            warn!("nym: prekey request but no mailbox registered");
-            return;
-        }
-        Err(e) => {
-            error!("nym: first_mailbox_addr in prekey request: {e}");
-            return;
-        }
+    // reply_mailbox_addr tells us where to route the bundle response on the
+    // requester's provider (i.e. which mailbox to store it under).
+    let reply_mailbox_tag: [u8; ROUTING_TAG_LEN] = if request.reply_mailbox_addr.len() == ROUTING_TAG_LEN {
+        request.reply_mailbox_addr.as_slice().try_into().unwrap()
+    } else {
+        warn!("nym: PreKeyRequest has invalid reply_mailbox_addr");
+        return;
     };
 
-    // Fetch identity key for the mailbox.
-    let identity_key = match mailbox.identity_key_for(&mailbox_addr).await {
-        Ok(Some(k)) => k,
-        Ok(None) => {
-            warn!("nym: prekey request but no identity key for mailbox");
-            return;
-        }
-        Err(e) => {
-            error!("nym: identity_key_for: {e}");
-            return;
-        }
-    };
-
-    // Get the active signed prekey.
-    let spk = match prekeys.active_signed_prekey(&mailbox_addr).await {
+    // Get the active signed prekey for the target mailbox.
+    let spk = match prekeys.active_signed_prekey(target_mailbox_addr).await {
         Ok(Some(s)) => s,
         Ok(None) => {
-            warn!("nym: prekey request but no signed prekey available");
+            warn!("nym: prekey request for unknown or empty mailbox {target_mailbox_addr}");
             return;
         }
         Err(e) => {
-            error!("nym: active_signed_prekey: {e}");
+            error!("nym: active_signed_prekey for {target_mailbox_addr}: {e}");
+            return;
+        }
+    };
+
+    // Fetch the identity key for the target mailbox.
+    let identity_key = match mailbox.identity_key_for(target_mailbox_addr).await {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            warn!("nym: no identity key for mailbox {target_mailbox_addr}");
+            return;
+        }
+        Err(e) => {
+            error!("nym: identity_key_for {target_mailbox_addr}: {e}");
             return;
         }
     };
 
     // Pop a one-time prekey (optional).
-    let opk = match prekeys.pop_one_time_prekey(&mailbox_addr).await {
+    let opk = match prekeys.pop_one_time_prekey(target_mailbox_addr).await {
         Ok(o) => o,
         Err(e) => {
-            error!("nym: pop_one_time_prekey: {e}");
+            error!("nym: pop_one_time_prekey for {target_mailbox_addr}: {e}");
             None
         }
     };
 
-    // Build PreKeyBundle.
+    // Build PreKeyBundle proto.
     let bundle = proto::PreKeyBundle {
         identity_key,
         signed_prekey_id: spk.prekey_id,
@@ -253,14 +229,15 @@ async fn handle_prekey_request(
         one_time_prekey: opk.map(|o| o.public_key).unwrap_or_default(),
     };
 
-    // Encode with PREFIX_PREKEY_BUNDLE prefix.
-    let mut payload = vec![PREFIX_PREKEY_BUNDLE];
-    payload.extend_from_slice(&bundle.encode_to_vec());
+    let bundle_bytes = bundle.encode_to_vec();
 
-    if let Err(e) = nym.send(&reply_addr, &payload).await {
+    if let Err(e) = nym
+        .send_routed(&reply_addr, PREFIX_PREKEY_BUNDLE, &reply_mailbox_tag, &bundle_bytes)
+        .await
+    {
         error!("nym: failed to send prekey bundle to {reply_addr}: {e}");
     } else {
-        info!("nym: sent prekey bundle to {reply_addr}");
+        info!("nym: sent prekey bundle for {target_mailbox_addr} to {reply_addr}");
     }
 }
 

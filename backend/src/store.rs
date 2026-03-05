@@ -11,7 +11,6 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS mailboxes (
     mailbox_addr TEXT PRIMARY KEY,
     identity_key BLOB NOT NULL,
-    nym_address  TEXT NOT NULL,
     created_at   INTEGER NOT NULL
 );
 
