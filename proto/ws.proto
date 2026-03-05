@@ -58,6 +58,7 @@ message SendMessage {
   string correlation_id  = 1;  // UUID v4, for matching SendAck
   string to_nym_address  = 2;  // recipient provider's Nym address
   bytes  sealed_envelope = 3;  // serialised SealedEnvelope proto bytes
+  bytes  to_mailbox_addr = 4;  // recipient's mailbox address, 32 raw bytes (BLAKE3 of their IK)
 }
 
 message Messages {

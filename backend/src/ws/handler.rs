@@ -1,7 +1,7 @@
 use crate::{
-    crypto::{verify_spk},
+    crypto::verify_spk,
     mailbox::MailboxStore,
-    nym_client::NymHandle,
+    nym_client::{NymHandle, PREFIX_MAILBOX_MSG, ROUTING_TAG_LEN},
     prekeys::PrekeyStore,
     proto::{
         ws_server_message, Error, FetchMessages, Messages, Pong, SendAck, SendMessage,
@@ -76,7 +76,24 @@ pub async fn handle_send(sess: &mut Session, req: SendMessage, nym: &NymHandle) 
         return vec![reply.encode_to_vec()];
     }
 
-    let (ok, error_code) = match nym.send(&req.to_nym_address, &req.sealed_envelope).await {
+    // The to_mailbox_addr must be exactly 32 bytes — the raw BLAKE3 routing tag.
+    if req.to_mailbox_addr.len() != ROUTING_TAG_LEN {
+        let reply = WsServerMessage {
+            body: Some(ws_server_message::Body::SendAck(SendAck {
+                correlation_id: req.correlation_id,
+                ok: false,
+                error_code: ERR_INVALID_MESSAGE.to_string(),
+            })),
+        };
+        return vec![reply.encode_to_vec()];
+    }
+    let mut routing_tag = [0u8; ROUTING_TAG_LEN];
+    routing_tag.copy_from_slice(&req.to_mailbox_addr);
+
+    let (ok, error_code) = match nym
+        .send_routed(&req.to_nym_address, PREFIX_MAILBOX_MSG, &routing_tag, &req.sealed_envelope)
+        .await
+    {
         Ok(_) => (true, String::new()),
         Err(e) => {
             warn!("handler: send via nym failed: {e}");

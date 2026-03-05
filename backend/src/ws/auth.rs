@@ -47,7 +47,7 @@ pub async fn verify_response(
     let mailbox_addr = mailbox_addr_from_key(identity_key);
 
     if let Err(e) = mailbox_store
-        .register_mailbox(&mailbox_addr, identity_key, "")
+        .register_mailbox(&mailbox_addr, identity_key)
         .await
     {
         tracing::error!("register mailbox: {e}");

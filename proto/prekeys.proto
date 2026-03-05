@@ -25,5 +25,7 @@ message OneTimePreKey {
 
 // Sent via Nym from requester to provider to request a prekey bundle
 message PreKeyRequest {
-  bytes reply_nym_address = 1;  // Nym address to send the PreKeyBundle response to
+  bytes reply_nym_address    = 1;  // Nym address to send the PreKeyBundle response to
+  bytes target_mailbox_addr  = 2;  // 32-byte mailbox address of the user whose bundle we want
+  bytes reply_mailbox_addr   = 3;  // 32-byte mailbox address of the requester (for routing the response)
 }

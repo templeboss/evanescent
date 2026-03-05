@@ -17,7 +17,6 @@ fn now_ms() -> i64 {
 #[derive(Debug)]
 pub struct StoredMsg {
     pub id: String,
-    pub mailbox_addr: String,
     pub envelope: Vec<u8>,
     pub received_at: i64,
 }
@@ -32,19 +31,18 @@ impl MailboxStore {
         Self { db }
     }
 
+    /// Register a mailbox on first auth. No-ops if the mailbox already exists.
     pub async fn register_mailbox(
         &self,
         mailbox_addr: &str,
         identity_key: &[u8],
-        nym_address: &str,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT OR IGNORE INTO mailboxes (mailbox_addr, identity_key, nym_address, created_at)
-             VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO mailboxes (mailbox_addr, identity_key, created_at)
+             VALUES (?, ?, ?)",
         )
         .bind(mailbox_addr)
         .bind(identity_key)
-        .bind(nym_address)
         .bind(now_ms())
         .execute(&self.db)
         .await
@@ -92,7 +90,6 @@ impl MailboxStore {
             .into_iter()
             .map(|r| StoredMsg {
                 id: r.get("id"),
-                mailbox_addr: mailbox_addr.to_string(),
                 envelope: r.get("envelope"),
                 received_at: r.get("received_at"),
             })
@@ -113,16 +110,6 @@ impl MailboxStore {
         }
         tx.commit().await.context("ack commit")?;
         Ok(())
-    }
-
-    /// Returns the mailbox_addr of the first registered user, or None.
-    pub async fn first_mailbox_addr(&self) -> Result<Option<String>> {
-        let row =
-            sqlx::query("SELECT mailbox_addr FROM mailboxes ORDER BY created_at ASC LIMIT 1")
-                .fetch_optional(&self.db)
-                .await
-                .context("first_mailbox_addr")?;
-        Ok(row.map(|r| r.get("mailbox_addr")))
     }
 
     async fn clean_expired(&self) {
