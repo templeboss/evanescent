@@ -54,6 +54,7 @@ pub async fn verify_response(
         return Ok(vec![error_frame(ERR_INTERNAL)]);
     }
 
+    let mailbox_addr_bytes = hex::decode(&mailbox_addr).unwrap_or_default();
     sess.authenticate(identity_key.to_vec(), mailbox_addr);
 
     let auth_ok = WsServerMessage {
@@ -65,6 +66,7 @@ pub async fn verify_response(
         body: Some(ws_server_message::Body::ProviderInfo(ProviderInfo {
             nym_address: provider_nym_addr.to_string(),
             onion_address: provider_onion_addr.to_string(),
+            mailbox_addr: mailbox_addr_bytes,
         })),
     };
     Ok(vec![auth_ok.encode_to_vec(), provider_info.encode_to_vec()])

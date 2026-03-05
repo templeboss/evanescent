@@ -26,7 +26,7 @@ class ProviderClient(
     private val identityPriv: ByteArray,
     private val identityPub: ByteArray,
     private val onEnvelopeReceived: suspend (id: String, envelope: ByteArray) -> Unit,
-    private val onProviderInfo: (nymAddress: String, onionAddress: String) -> Unit = { _, _ -> },
+    private val onProviderInfo: (nymAddress: String, onionAddress: String, mailboxAddr: ByteArray) -> Unit = { _, _, _ -> },
     private val onAuthenticated: suspend (ws: WebSocket) -> Unit = {}
 ) {
     private val queue = MessageQueue()
@@ -83,13 +83,20 @@ class ProviderClient(
     }
 
     /**
-     * Send a sealed envelope to the provider.
-     * @return null on success, or the error code string on failure (e.g. "PREKEY_EXHAUSTED").
+     * Send a payload to the provider for routing via Nym.
+     * @param toMailboxAddr 32-byte BLAKE3 mailbox address of the target.
+     * @param nymPrefix Nym routing prefix: 0x05=mailbox message (default), 0x01=prekey request.
+     * @return null on success, or the error code string on failure.
      */
-    suspend fun send(toNymAddress: String, sealedEnvelope: ByteArray): String? {
+    suspend fun send(
+        toNymAddress: String,
+        toMailboxAddr: ByteArray,
+        sealedEnvelope: ByteArray,
+        nymPrefix: Int = 0x05
+    ): String? {
         val correlationId = UUID.randomUUID().toString()
         val deferred = queue.register(correlationId)
-        val msg = buildSendMessage(correlationId, toNymAddress, sealedEnvelope)
+        val msg = buildSendMessage(correlationId, toNymAddress, toMailboxAddr, sealedEnvelope, nymPrefix)
         if (socket?.send(msg.toByteString()) != true) return "NO_SOCKET"
         return try {
             val (ok, errorCode) = withTimeout(30_000) { deferred.await() }
@@ -165,13 +172,25 @@ class ProviderClient(
         return encodeMessage(4, payload)
     }
 
-    private fun buildSendMessage(correlationId: String, toNymAddress: String, envelope: ByteArray): ByteArray {
+    private fun buildSendMessage(
+        correlationId: String,
+        toNymAddress: String,
+        toMailboxAddr: ByteArray,
+        envelope: ByteArray,
+        nymPrefix: Int = 0x05
+    ): ByteArray {
         val payload = encodeString(1, correlationId) +
             encodeString(2, toNymAddress) +
-            encodeBytes(3, envelope)
+            encodeBytes(3, envelope) +
+            encodeBytes(4, toMailboxAddr) +
+            encodeVarintField(5, nymPrefix.toLong())
         // WsClientMessage { send_message: SendMessage } — field 5
         return encodeMessage(5, payload)
     }
+
+    /** Encode a varint field: tag(fieldNum, wireType=0) + varint(value). */
+    private fun encodeVarintField(fieldNum: Int, value: Long): ByteArray =
+        encodeTag(fieldNum, 0) + encodeVarint(value)
 
     // ── Minimal protowire encoding ─────────────────────────────────────────
 
@@ -324,6 +343,7 @@ class ProviderClient(
     private fun parseProviderInfo(data: ByteArray): ServerMsg.ProviderInfo {
         var nymAddress = ""
         var onionAddress = ""
+        var mailboxAddr = byteArrayOf()
         var pos = 0
         while (pos < data.size) {
             val (tag, n) = readVarint(data, pos); pos += n
@@ -331,16 +351,17 @@ class ProviderClient(
             val wireType = (tag and 0x7).toInt()
             if (wireType == 2) {
                 val (len, n2) = readVarint(data, pos); pos += n2
-                val v = String(data, pos, len.toInt(), Charsets.UTF_8); pos += len.toInt()
+                val v = data.copyOfRange(pos, pos + len.toInt()); pos += len.toInt()
                 when (fieldNum) {
-                    1 -> nymAddress = v
-                    2 -> onionAddress = v
+                    1 -> nymAddress = String(v, Charsets.UTF_8)
+                    2 -> onionAddress = String(v, Charsets.UTF_8)
+                    3 -> mailboxAddr = v
                 }
             } else {
                 pos += skipField(data, pos, wireType)
             }
         }
-        return ServerMsg.ProviderInfo(nymAddress, onionAddress)
+        return ServerMsg.ProviderInfo(nymAddress, onionAddress, mailboxAddr)
     }
 
     private fun readVarint(data: ByteArray, start: Int): Pair<Long, Int> {
@@ -420,7 +441,7 @@ class ProviderClient(
             }
             is ServerMsg.SendAck -> queue.complete(msg.result.correlationId, msg.result.ok, msg.result.errorCode)
             ServerMsg.Pong -> {}
-            is ServerMsg.ProviderInfo -> onProviderInfo(msg.nymAddress, msg.onionAddress)
+            is ServerMsg.ProviderInfo -> onProviderInfo(msg.nymAddress, msg.onionAddress, msg.mailboxAddr)
             is ServerMsg.Error -> Log.w(TAG, "server error: ${msg.code}")
             ServerMsg.Unknown -> {}
         }
@@ -448,7 +469,7 @@ class ProviderClient(
         data class Messages(val items: List<StoredMsg>) : ServerMsg()
         data class SendAck(val result: AckResult) : ServerMsg()
         object Pong : ServerMsg()
-        data class ProviderInfo(val nymAddress: String, val onionAddress: String) : ServerMsg()
+        data class ProviderInfo(val nymAddress: String, val onionAddress: String, val mailboxAddr: ByteArray) : ServerMsg()
         data class Error(val code: String) : ServerMsg()
         object Unknown : ServerMsg()
     }
