@@ -1,9 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- All connections route through Orbot (Tor SOCKS5). No clearnet traffic permitted. -->
+    <!--
+        All real connections route through Orbot (Tor SOCKS5).
+        .onion addresses use ws:// — cleartext is permitted because Tor provides end-to-end
+        encryption at the transport layer. No cleartext to the regular internet is allowed.
+    -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">onion</domain>
+    </domain-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
-            <!-- No trust anchors: .onion connections are authenticated by the onion address itself. -->
+            <certificates src="system" />
         </trust-anchors>
     </base-config>
 </network-security-config>
