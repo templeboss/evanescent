@@ -1,9 +1,5 @@
 # Evanescent — Personal Provider (Backend)
 
-**Agent briefing**: You are implementing the Rust backend server. Read [docs/standards.md](../docs/standards.md) before writing any code. This README describes your scope, constraints, and integration points.
-
----
-
 ## Role
 
 The Personal Provider is a long-running Rust server operated on behalf of a user. It is the user's permanent presence on the Nym network. The Android app is ephemeral; this server is not.

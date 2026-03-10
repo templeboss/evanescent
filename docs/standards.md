@@ -1,8 +1,6 @@
 # Evanescent — Engineering Standards
 
-**All agents and contributors must read this document before writing any code.**
-
-This document is the single source of truth for every interface boundary in the system. Its purpose is to prevent mismatches between the Go backend and the Android client. When in doubt, this file wins.
+This document is the single source of truth for every interface boundary in the system. Its purpose is to prevent mismatches between the backend and the Android client. When in doubt, this file wins.
 
 ---
 

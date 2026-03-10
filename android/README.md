@@ -1,9 +1,5 @@
 # Evanescent — Android Client
 
-**Agent briefing**: You are implementing the Android app in Kotlin. Read [docs/standards.md](../docs/standards.md) before writing any code. This README describes your scope, constraints, and integration points.
-
----
-
 ## Role
 
 The Android app is the only user interface. It holds the user's identity keypair and performs all encryption and decryption locally. The provider is a dumb relay from the app's perspective — it stores ciphertext blobs it cannot read.

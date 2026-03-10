@@ -1,9 +1,5 @@
 # Evanescent — Protocol Buffers
 
-**Agent briefing**: This directory is the source of truth for all wire formats. If you are adding a field, changing a type, or adding a message, you do so here — nowhere else. Both Go and Android generate their types from these files. Read [docs/standards.md](../docs/standards.md) before making any changes.
-
----
-
 ## Role
 
 The `proto/` directory defines every message that crosses a component boundary:

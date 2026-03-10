@@ -40,7 +40,7 @@ evanescent/
   docs/
     architecture.md      ← full system architecture
     threat-model.md      ← threat model and adversary analysis
-    standards.md         ← CANONICAL standards — read before writing any code
+    standards.md         ← canonical engineering standards
 ```
 
 ---
@@ -77,7 +77,7 @@ Message routing: `Android → [Tor] → Personal Provider → [Nym mix-net] → 
 
 - [Architecture](docs/architecture.md) — detailed system design
 - [Threat Model](docs/threat-model.md) — adversary model and mitigations
-- **[Standards](docs/standards.md) — all agents must read this first**
+- [Standards](docs/standards.md) — canonical standards
 
 ---
 
