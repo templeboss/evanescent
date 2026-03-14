@@ -19,14 +19,14 @@ private const val TAG = "Evanescent"
 
 /**
  * WebSocket client for the Personal Provider.
- * All connections route through Orbot SOCKS5 proxy.
+ * All connections route through the embedded Tor SOCKS5 proxy (TorManager).
  * Handles: authentication, FetchMessages polling, SendMessage with ack.
  */
 class ProviderClient(
     private val identityPriv: ByteArray,
     private val identityPub: ByteArray,
     private val onEnvelopeReceived: suspend (id: String, envelope: ByteArray) -> Unit,
-    private val onProviderInfo: (nymAddress: String, onionAddress: String, mailboxAddr: ByteArray) -> Unit = { _, _, _ -> },
+    private val onProviderInfo: (onionAddress: String, mailboxAddr: ByteArray) -> Unit = { _, _ -> },
     private val onAuthenticated: suspend (ws: WebSocket) -> Unit = {}
 ) {
     private val queue = MessageQueue()
@@ -40,11 +40,15 @@ class ProviderClient(
     @Volatile private var pendingNonce: ByteArray? = null
     @Volatile private var pendingAckIds: MutableList<String> = mutableListOf()
 
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(OrbotHelper.SOCKS5_HOST, OrbotHelper.SOCKS5_PORT)))
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
+    private val client: OkHttpClient
+        get() {
+            val port = TorManager.socksPort.takeIf { it > 0 } ?: 9050
+            return OkHttpClient.Builder()
+                .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port)))
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .build()
+        }
 
     sealed class ConnectionState {
         object Disconnected : ConnectionState()
@@ -54,7 +58,7 @@ class ProviderClient(
     }
 
     fun connect(onionAddress: String) {
-        require(OrbotHelper.isValidOnionAddress(onionAddress)) { "Invalid .onion address: $onionAddress" }
+        require(TorManager.isValidOnionAddress(onionAddress)) { "Invalid .onion address: $onionAddress" }
         scope.launch { connectWithBackoff(onionAddress) }
     }
 
@@ -83,20 +87,21 @@ class ProviderClient(
     }
 
     /**
-     * Send a payload to the provider for routing via Nym.
+     * Send a sealed envelope to the provider for routing to the recipient's provider.
+     * @param toProviderOnion .onion address of the recipient's provider.
      * @param toMailboxAddr 32-byte BLAKE3 mailbox address of the target.
-     * @param nymPrefix Nym routing prefix: 0x05=mailbox message (default), 0x01=prekey request.
+     * @param sealedEnvelope Encrypted sealed sender envelope bytes.
      * @return null on success, or the error code string on failure.
      */
     suspend fun send(
-        toNymAddress: String,
+        toProviderOnion: String,
         toMailboxAddr: ByteArray,
-        sealedEnvelope: ByteArray,
-        nymPrefix: Int = 0x05
+        sealedEnvelope: ByteArray
     ): String? {
+        if (!TorManager.isReady()) return "TOR_NOT_READY"
         val correlationId = UUID.randomUUID().toString()
         val deferred = queue.register(correlationId)
-        val msg = buildSendMessage(correlationId, toNymAddress, toMailboxAddr, sealedEnvelope, nymPrefix)
+        val msg = buildSendMessage(correlationId, toProviderOnion, toMailboxAddr, sealedEnvelope)
         if (socket?.send(msg.toByteString()) != true) return "NO_SOCKET"
         return try {
             val (ok, errorCode) = withTimeout(30_000) { deferred.await() }
@@ -104,6 +109,31 @@ class ProviderClient(
         } catch (e: TimeoutCancellationException) {
             queue.complete(correlationId, false, "TIMEOUT")
             "TIMEOUT"
+        }
+    }
+
+    /**
+     * Request a PreKeyBundle for a contact from the provider.
+     * The provider fetches the bundle from the contact's provider and returns it.
+     * @param targetMailboxAddr 32-byte mailbox address of the contact whose prekeys to fetch.
+     * @param targetProviderOnion .onion address of the contact's provider.
+     * @return PreKeyBundle proto bytes, or null on timeout/failure.
+     */
+    suspend fun getPreKeys(
+        targetMailboxAddr: ByteArray,
+        targetProviderOnion: String
+    ): ByteArray? {
+        if (!TorManager.isReady()) return null
+        val correlationId = UUID.randomUUID().toString()
+        val deferred = queue.register(correlationId)
+        val msg = buildGetPreKeys(correlationId, targetMailboxAddr, targetProviderOnion)
+        if (socket?.send(msg.toByteString()) != true) return null
+        return try {
+            val (ok, _) = withTimeout(60_000) { deferred.await() }
+            if (ok) queue.takePreKeyBundle(correlationId) else null
+        } catch (e: TimeoutCancellationException) {
+            queue.complete(correlationId, false, "TIMEOUT")
+            null
         }
     }
 
@@ -174,23 +204,29 @@ class ProviderClient(
 
     private fun buildSendMessage(
         correlationId: String,
-        toNymAddress: String,
+        toProviderOnion: String,
         toMailboxAddr: ByteArray,
-        envelope: ByteArray,
-        nymPrefix: Int = 0x05
+        envelope: ByteArray
     ): ByteArray {
         val payload = encodeString(1, correlationId) +
-            encodeString(2, toNymAddress) +
+            encodeBytes(2, toMailboxAddr) +
             encodeBytes(3, envelope) +
-            encodeBytes(4, toMailboxAddr) +
-            encodeVarintField(5, nymPrefix.toLong())
+            encodeString(4, toProviderOnion)
         // WsClientMessage { send_message: SendMessage } — field 5
         return encodeMessage(5, payload)
     }
 
-    /** Encode a varint field: tag(fieldNum, wireType=0) + varint(value). */
-    private fun encodeVarintField(fieldNum: Int, value: Long): ByteArray =
-        encodeTag(fieldNum, 0) + encodeVarint(value)
+    private fun buildGetPreKeys(
+        correlationId: String,
+        targetMailboxAddr: ByteArray,
+        targetProviderOnion: String
+    ): ByteArray {
+        val payload = encodeString(1, correlationId) +
+            encodeBytes(2, targetMailboxAddr) +
+            encodeString(3, targetProviderOnion)
+        // WsClientMessage { get_pre_keys: GetPreKeys } — field 6
+        return encodeMessage(6, payload)
+    }
 
     // ── Minimal protowire encoding ─────────────────────────────────────────
 
@@ -236,7 +272,8 @@ class ProviderClient(
                     4 -> ServerMsg.SendAck(parseSendAck(payload))
                     5 -> ServerMsg.Pong
                     6 -> ServerMsg.Error(parseError(payload))
-                    7 -> ServerMsg.ProviderInfo(parseProviderInfo(payload))
+                    7 -> parseProviderInfo(payload)
+                    8 -> ServerMsg.PreKeys(parsePreKeysResponse(payload))
                     else -> ServerMsg.Unknown
                 }
             } else {
@@ -341,7 +378,7 @@ class ProviderClient(
     }
 
     private fun parseProviderInfo(data: ByteArray): ServerMsg.ProviderInfo {
-        var nymAddress = ""
+        // field 1 (nym_address) is RESERVED — ignored
         var onionAddress = ""
         var mailboxAddr = byteArrayOf()
         var pos = 0
@@ -353,7 +390,6 @@ class ProviderClient(
                 val (len, n2) = readVarint(data, pos); pos += n2
                 val v = data.copyOfRange(pos, pos + len.toInt()); pos += len.toInt()
                 when (fieldNum) {
-                    1 -> nymAddress = String(v, Charsets.UTF_8)
                     2 -> onionAddress = String(v, Charsets.UTF_8)
                     3 -> mailboxAddr = v
                 }
@@ -361,7 +397,30 @@ class ProviderClient(
                 pos += skipField(data, pos, wireType)
             }
         }
-        return ServerMsg.ProviderInfo(nymAddress, onionAddress, mailboxAddr)
+        return ServerMsg.ProviderInfo(onionAddress, mailboxAddr)
+    }
+
+    private fun parsePreKeysResponse(data: ByteArray): PreKeysResult {
+        // PreKeysResponse { correlation_id: string (field 1), bundle: bytes (field 2) }
+        var correlationId = ""
+        var bundle = byteArrayOf()
+        var pos = 0
+        while (pos < data.size) {
+            val (tag, n) = readVarint(data, pos); pos += n
+            val fieldNum = (tag shr 3).toInt()
+            val wireType = (tag and 0x7).toInt()
+            if (wireType == 2) {
+                val (len, n2) = readVarint(data, pos); pos += n2
+                val v = data.copyOfRange(pos, pos + len.toInt()); pos += len.toInt()
+                when (fieldNum) {
+                    1 -> correlationId = String(v, Charsets.UTF_8)
+                    2 -> bundle = v
+                }
+            } else {
+                pos += skipField(data, pos, wireType)
+            }
+        }
+        return PreKeysResult(correlationId, bundle)
     }
 
     private fun readVarint(data: ByteArray, start: Int): Pair<Long, Int> {
@@ -441,7 +500,8 @@ class ProviderClient(
             }
             is ServerMsg.SendAck -> queue.complete(msg.result.correlationId, msg.result.ok, msg.result.errorCode)
             ServerMsg.Pong -> {}
-            is ServerMsg.ProviderInfo -> onProviderInfo(msg.nymAddress, msg.onionAddress, msg.mailboxAddr)
+            is ServerMsg.ProviderInfo -> onProviderInfo(msg.onionAddress, msg.mailboxAddr)
+            is ServerMsg.PreKeys -> queue.completeWithBundle(msg.result.correlationId, msg.result.bundle)
             is ServerMsg.Error -> Log.w(TAG, "server error: ${msg.code}")
             ServerMsg.Unknown -> {}
         }
@@ -469,13 +529,15 @@ class ProviderClient(
         data class Messages(val items: List<StoredMsg>) : ServerMsg()
         data class SendAck(val result: AckResult) : ServerMsg()
         object Pong : ServerMsg()
-        data class ProviderInfo(val nymAddress: String, val onionAddress: String, val mailboxAddr: ByteArray) : ServerMsg()
+        data class ProviderInfo(val onionAddress: String, val mailboxAddr: ByteArray) : ServerMsg()
+        data class PreKeys(val result: PreKeysResult) : ServerMsg()
         data class Error(val code: String) : ServerMsg()
         object Unknown : ServerMsg()
     }
 
     private data class StoredMsg(val id: String, val envelope: ByteArray, val receivedAt: Long)
     private data class AckResult(val correlationId: String, val ok: Boolean, val errorCode: String)
+    private data class PreKeysResult(val correlationId: String, val bundle: ByteArray)
 }
 
 private operator fun ByteArray.plus(other: ByteArray): ByteArray {

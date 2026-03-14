@@ -1,15 +1,15 @@
-# Evanescent — Personal Provider (Backend)
+# Evanescent — Provider (Backend)
 
 ## Role
 
-The Personal Provider is a long-running Rust server operated on behalf of a user. It is the user's permanent presence on the Nym network. The Android app is ephemeral; this server is not.
+The provider is a long-running Rust server that acts as a persistent presence for one or more users. The Android app is ephemeral; the provider is not.
 
 **What this server does:**
-1. Runs the Nym SDK natively (no subprocess) and maintains a persistent Nym network connection with automatic cover traffic (Loopix loop/drop)
-2. Receives messages from the Nym network and stores them encrypted for offline delivery
-3. Serves the user's X3DH prekey bundles to other users (via Nym)
-4. Exposes a Tor hidden service (`.onion`) for the Android app to connect to
-5. Authenticates the Android app via challenge-response and delivers stored messages over WebSocket
+1. Maintains a Tor hidden service (`.onion`) for Android clients to connect to
+2. Authenticates Android clients via challenge-response over WebSocket
+3. Receives messages from other providers via HTTP over Tor and stores them encrypted for offline delivery
+4. Serves the user's X3DH prekey bundles to other providers on request
+5. Relays outbound messages to recipient providers via Tor SOCKS5
 
 **What this server does NOT do:**
 - It never decrypts any message content
@@ -25,14 +25,15 @@ The Personal Provider is a long-running Rust server operated on behalf of a user
 | Component | Choice | Version |
 |---|---|---|
 | Language | Rust | stable (2021 edition) |
-| Nym transport | `nym-sdk` (native SDK) | git master |
-| SQLite driver | `rusqlite` (bundled C) | 0.31 |
-| Tor control | raw TCP control protocol | — |
-| WebSocket server | `axum` 0.7 | — |
-| Proto codegen | `prost-build` | 0.12 |
-| Config | `serde_yaml` | 0.9 |
-| Logging | `tracing` + `tracing-subscriber` | — |
-| Crypto | `ed25519-dalek` 2.x | — |
+| Async runtime | tokio | 1.x |
+| WebSocket server | axum | 0.7 |
+| HTTP client (inter-provider) | reqwest | 0.12 |
+| SQLite | sqlx | 0.8 |
+| Proto serialization | prost | 0.12 |
+| Tor integration | raw TCP control protocol | — |
+| Config | serde_yaml | 0.9 |
+| Logging | tracing + tracing-subscriber | — |
+| Crypto | ed25519-dalek 2.x, blake3 | — |
 
 ---
 
@@ -40,28 +41,28 @@ The Personal Provider is a long-running Rust server operated on behalf of a user
 
 ```
 backend/
-  Cargo.toml          Package manifest
-  build.rs            prost-build: compiles proto/*.proto → src/proto/
+  Cargo.toml
+  build.rs          prost-build: compiles proto/*.proto
 
   src/
-    main.rs           Entry point — wires all subsystems, handles graceful shutdown
-    config.rs         serde_yaml config structs + defaults
-    store.rs          SQLite open + WAL + schema migration
-    mailbox.rs        Message CRUD + 30-day TTL cleaner task
-    prekeys.rs        SPK store + OTP pool + rotation task
-    crypto.rs         Ed25519 verify_auth, verify_spk, mailbox_addr_from_key
-    onion.rs          Tor hidden service via raw TCP control protocol (ADD_ONION)
-    nym_client.rs     Nym SDK: connect, send, receive loop, inbound router
+    main.rs         Entry point — startup, routes, graceful shutdown
+    config.rs       YAML config
+    store.rs        SQLite schema + migrations
+    mailbox.rs      Mailbox CRUD + 30-day TTL
+    prekeys.rs      Signed prekey + OTP store + rotation
+    crypto.rs       Ed25519 auth verification, mailbox_addr derivation
+    onion.rs        Tor hidden service (raw control protocol)
+    relay.rs        Outbound HTTP client via Tor SOCKS5 (inter-provider delivery + prekey fetch)
 
     proto/
-      mod.rs          include!(OUT_DIR/evanescent.v1.rs) — prost-generated types
+      mod.rs        prost-generated types
 
     ws/
-      mod.rs          axum WebSocket server, AppState, connection lifecycle
-      auth.rs         Challenge-response authentication (start_challenge, verify_response)
-      handler.rs      Post-auth dispatch: FetchMessages, SendMessage, UploadPreKeys, Ping
-      session.rs      Per-connection state (owned by read-loop task, no locks needed)
-      errors.rs       Error code string constants per standards.md §14
+      mod.rs        axum WebSocket server + inter-provider HTTP routes, AppState
+      auth.rs       Challenge-response auth
+      handler.rs    FetchMessages, SendMessage, GetPreKeys, UploadPreKeys, Ping
+      session.rs    Per-connection state
+      errors.rs     Error code constants
 ```
 
 ---
@@ -73,21 +74,18 @@ Config file path passed as `--config <path>` (all fields optional; defaults show
 ```yaml
 # provider.yaml
 
-nym:
-  data_dir: /var/lib/evanescent/nym    # Nym SDK stores identity here; persisted across restarts
-  gateway: null                         # null = auto-select from network
-
 tor:
   control_port: 9051
-  ws_port: 8765                         # internal WebSocket port (loopback only)
-  hidden_service_port: 443              # external port on .onion address
+  socks_port: 9050      # Tor SOCKS5 proxy port (used for inter-provider relay)
+  ws_port: 8765         # internal WebSocket port (loopback only)
+  hidden_service_port: 443
 
 storage:
   db_path: /var/lib/evanescent/provider.db
 
 logging:
-  level: info                           # debug | info | warn | error
-  format: json                          # json | text
+  level: info           # debug | info | warn | error
+  format: json          # json | text
 ```
 
 ---
@@ -115,7 +113,7 @@ The `build.rs` script runs `prost-build` on first compilation, generating
 ## Running
 
 Prerequisites:
-1. Tor daemon running with `ControlPort 9051` in torrc (unauthenticated or cookie auth)
+1. Tor daemon running with `ControlPort 9051` and `SocksPort 9050` in torrc (unauthenticated or cookie auth)
 2. Config file written
 
 ```bash
@@ -124,10 +122,9 @@ Prerequisites:
 
 On first run, the provider will:
 1. Initialise the SQLite database (WAL mode)
-2. Initialise the Nym SDK client (generates Nym identity in `nym.data_dir` if not present)
-3. Create the Tor hidden service (generates `.onion` key via Tor daemon)
-4. Print the `.onion` address and Nym address to stdout — **save these for the ContactBundle**
-5. Begin accepting WebSocket connections on the `.onion` address
+2. Create the Tor hidden service (generates `.onion` key via Tor daemon)
+3. Print the `.onion` address to stdout — **save this for the ContactBundle**
+4. Begin accepting WebSocket connections on the `.onion` address
 
 ---
 
@@ -146,31 +143,32 @@ Key invariants enforced by this server:
 
 ---
 
-## Nym Integration
+## Inter-Provider API
 
-The Nym SDK client runs natively in-process via `nym_client.rs`. Cover traffic
-(Loopix loop and drop messages) is **automatic** — the SDK handles this; no manual
-scheduling is needed.
+Both endpoints are served on the same port as the WebSocket server, via the Tor hidden service.
 
-**Inbound routing prefix bytes:**
-- `0x01` → prekey bundle request (TODO: parse + respond)
-- `0x02` → loop cover — discard silently
-- `0x03` → drop cover — discard silently
-- other → sealed envelope for mailbox store
+```
+POST /api/v1/deliver
+  Receives a message from another provider and stores it in the recipient's mailbox.
 
-**Send:** `NymHandle::send(to_nym_addr, payload)` — async, buffered via mpsc channel.
+GET /api/v1/prekeys/:mailbox_addr
+  Returns a PreKeyBundle proto for the given mailbox address.
+```
+
+Request and response bodies are proto3 binary (`Content-Type: application/x-protobuf`).
+
+Authentication is not required at the HTTP level. The `.onion` address provides transport-level authentication — a provider can only be reached by another party that already knows its address.
 
 ---
 
 ## Prekey Management
 
-**Storage:** signed prekeys and one-time prekeys are uploaded from Android via
-`UploadPreKeys` WS message and stored in SQLite.
+**Storage:** signed prekeys and one-time prekeys are uploaded from Android via the `UploadPreKeys` WS message and stored in SQLite.
 
-**Serving prekey bundles (via Nym, inbound `0x01` prefix):**
+**Serving prekey bundles (via `GET /api/v1/prekeys/:mailbox_addr`):**
 1. Read current signed prekey (fallback to most recent if all expired)
 2. Pop one OTP key from pool (FIFO); serve bundle without OTP key if pool is empty
-3. Respond via `nym.send(reply_addr, PreKeyBundle.encode_to_vec())`
+3. Return `PreKeyBundle` proto in response body
 
 **OTP replenishment threshold:** 20 keys (`OTPK_REPLENISH_THRESHOLD` in `prekeys.rs`).
 
@@ -192,6 +190,5 @@ SPK rotation: expired signed prekeys are pruned daily by `PrekeyStore::spawn_rot
 - Do not add clearnet HTTP endpoints
 - Do not log message content, envelope bytes, or envelope sizes
 - Do not store any key that belongs on the Android device (identity private key, Double Ratchet state)
-- Do not implement Sphinx packet construction (Nym SDK's responsibility)
 - Do not add JSON wire format between Android and provider (use proto binary)
-- Do not write manual cover traffic — Nym SDK handles this automatically
+- Do not add JSON wire format for inter-provider HTTP (use proto binary)

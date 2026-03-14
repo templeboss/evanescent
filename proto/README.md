@@ -2,13 +2,14 @@
 
 ## Role
 
-The `proto/` directory defines every message that crosses a component boundary:
-- Messages sent between Android and the Personal Provider (WebSocket)
-- Messages sent via the Nym mix-net (provider ↔ provider)
-- Prekey bundles served from provider to requester
-- Local state serialised to SQLCipher (Double Ratchet state)
+The `proto/` directory is the source of truth for every message that crosses a component boundary:
 
-The `.proto` files are the contract. If the Go and Android implementations disagree, the `.proto` file is correct.
+- Messages exchanged between Android and the Provider over WebSocket
+- Prekey bundles served from provider to provider (HTTP)
+- Provider-to-provider message delivery (HTTP)
+- Local state serialised to SQLCipher (Double Ratchet state — never transmitted)
+
+The `.proto` files are the contract. If the Rust and Android implementations disagree, the `.proto` file is correct.
 
 ---
 
@@ -17,7 +18,7 @@ The `.proto` files are the contract. If the Go and Android implementations disag
 ```
 proto/
   ws.proto            WebSocket protocol: Android ↔ Provider
-  prekeys.proto       X3DH prekey bundles and upload messages
+  prekeys.proto       X3DH prekey bundles, upload messages, and provider-to-provider delivery
   messages.proto      Double Ratchet message header and envelope
   sealed_sender.proto Sealed sender outer envelope and inner content
   identity.proto      Contact bundles and identity keys
@@ -28,44 +29,19 @@ proto/
 
 ## Generation
 
-Run from the repository root. Generated files are committed to the repo.
+### Rust (backend)
 
-### Go
+Handled automatically by `prost-build` in `backend/build.rs`. No manual step required. The build script compiles all `.proto` files and emits Rust source into `OUT_DIR`.
 
-```bash
-protoc \
-  --go_out=backend/internal/proto \
-  --go_opt=paths=source_relative \
-  proto/*.proto
-```
+### Android (Kotlin)
 
-Output: `backend/internal/proto/<filename>.pb.go`
-
-### Kotlin / Android
+Handled by the Gradle protobuf plugin configured in `android/app/build.gradle`. Run a normal Gradle build to regenerate:
 
 ```bash
-protoc \
-  --kotlin_out=android/app/src/main/java \
-  --java_out=android/app/src/main/java \
-  proto/*.proto
+./gradlew :app:generateDebugProto
 ```
 
-Output: `android/app/src/main/java/evanescent/v1/`
-
-### Required Tools
-
-```bash
-# Install protoc
-# macOS:  brew install protobuf
-# Linux:  apt install protobuf-compiler  OR  download from github.com/protocolbuffers/protobuf/releases
-
-# Install Go plugin
-go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-
-# Install Kotlin plugin
-# Download protoc-gen-kotlin from: https://github.com/grpc/grpc-kotlin/releases
-# Or use the Gradle protobuf plugin in the Android project (preferred)
-```
+Output: `android/app/build/generated/source/proto/debug/java/evanescent/v1/`
 
 ---
 
@@ -108,8 +84,8 @@ Field numbers are permanent. Follow these rules without exception:
 | Timestamps | `int64` | Unix milliseconds. Never `google.protobuf.Timestamp`. |
 | IDs (prekey, message counter) | `uint32` | Monotonically increasing |
 | UUIDs | `string` | Formatted as standard UUID v4 string |
-| Nym addresses | `string` | `<pubkey_base64url>@<gateway_id>` |
 | Onion addresses | `string` | Full `.onion` address including suffix |
+| Mailbox addresses | `bytes` | 32 raw bytes — BLAKE3(identity_key)[0:32] |
 | Boolean flags | `bool` | |
 | Repeated fields | `repeated` | Never use `map` for protocol messages |
 
@@ -119,13 +95,15 @@ Field numbers are permanent. Follow these rules without exception:
 
 ### ws.proto — WebSocket Protocol
 
-All messages exchanged between Android and the Personal Provider over WebSocket.
+All messages exchanged between Android and the Provider over WebSocket.
 
 Each WebSocket binary frame contains exactly one `WsClientMessage` (Android → Provider) or `WsServerMessage` (Provider → Android).
 
 ```protobuf
 syntax = "proto3";
 package evanescent.v1;
+
+import "prekeys.proto";
 
 // Android → Provider
 message WsClientMessage {
@@ -136,6 +114,7 @@ message WsClientMessage {
     FetchMessages        fetch_messages         = 4;
     SendMessage          send_message           = 5;
     Ping                 ping                   = 6;
+    GetPreKeys           get_pre_keys           = 7;
   }
 }
 
@@ -148,6 +127,8 @@ message WsServerMessage {
     SendAck       send_ack       = 4;
     Pong          pong           = 5;
     Error         error          = 6;
+    ProviderInfo  provider_info  = 7;
+    PreKeys       pre_keys       = 8;
   }
 }
 
@@ -167,8 +148,8 @@ message AuthOk {
 }
 
 message UploadPreKeys {
-  repeated SignedPreKey   signed_prekeys    = 1;
-  repeated OneTimePreKey  one_time_prekeys  = 2;
+  repeated SignedPreKey  signed_prekeys   = 1;
+  repeated OneTimePreKey one_time_prekeys = 2;
 }
 
 message FetchMessages {
@@ -176,9 +157,21 @@ message FetchMessages {
 }
 
 message SendMessage {
-  string correlation_id   = 1;  // UUID v4, for matching SendAck
-  string to_nym_address   = 2;  // recipient provider's Nym address
-  bytes  sealed_envelope  = 3;  // serialised SealedEnvelope proto bytes
+  string correlation_id    = 1;  // UUID v4, for matching SendAck
+  reserved 2;                    // was to_nym_address
+  reserved "to_nym_address";
+  bytes  sealed_envelope   = 3;  // serialised SealedEnvelope proto bytes
+  bytes  to_mailbox_addr   = 4;  // target mailbox address, 32 raw bytes (BLAKE3 of their IK)
+  reserved 5;                    // was nym_prefix
+  reserved "nym_prefix";
+  string to_provider_onion = 6;  // recipient provider's .onion address
+}
+
+// Request a prekey bundle from another provider on the client's behalf.
+message GetPreKeys {
+  string provider_onion = 1;  // .onion address of the target provider
+  bytes  mailbox_addr   = 2;  // 32-byte mailbox address of the target user
+  string correlation_id = 3;  // UUID v4, for matching PreKeys response
 }
 
 message Messages {
@@ -194,7 +187,14 @@ message StoredMessage {
 message SendAck {
   string correlation_id = 1;
   bool   ok             = 2;
-  string error_code     = 3;  // present only if !ok; see standards.md §14 for valid values
+  string error_code     = 3;  // present only if !ok
+}
+
+// Response to GetPreKeys.
+message PreKeys {
+  string       correlation_id = 1;
+  PreKeyBundle bundle         = 2;  // absent on error
+  string       error_code     = 3;  // present only on error
 }
 
 message Ping {}
@@ -204,21 +204,29 @@ message Error {
   string code    = 1;
   string message = 2;
 }
+
+// Sent once immediately after AuthOk so the Android client knows its mailbox address and provider info.
+message ProviderInfo {
+  reserved 1;                  // was nym_address
+  reserved "nym_address";
+  string onion_address = 2;  // provider's .onion address (v3)
+  bytes  mailbox_addr  = 3;  // this client's mailbox address, 32 raw bytes (BLAKE3 of IK)
+}
 ```
 
-### prekeys.proto — X3DH Prekeys
+### prekeys.proto — X3DH Prekeys and Provider Delivery
 
 ```protobuf
 syntax = "proto3";
 package evanescent.v1;
 
 message PreKeyBundle {
-  bytes  identity_key        = 1;  // Ed25519 pubkey, 32 bytes
-  uint32 signed_prekey_id    = 2;
-  bytes  signed_prekey       = 3;  // X25519 pubkey, 32 bytes
-  bytes  signed_prekey_sig   = 4;  // Ed25519 signature, 64 bytes
-  uint32 one_time_prekey_id  = 5;  // absent (0) if exhausted
-  bytes  one_time_prekey     = 6;  // X25519 pubkey, 32 bytes; absent if exhausted
+  bytes  identity_key       = 1;  // Ed25519 pubkey, 32 bytes
+  uint32 signed_prekey_id   = 2;
+  bytes  signed_prekey      = 3;  // X25519 pubkey, 32 bytes
+  bytes  signed_prekey_sig  = 4;  // Ed25519 signature, 64 bytes
+  uint32 one_time_prekey_id = 5;  // absent (0) if exhausted
+  bytes  one_time_prekey    = 6;  // X25519 pubkey, 32 bytes; absent if exhausted
 }
 
 message SignedPreKey {
@@ -232,9 +240,10 @@ message OneTimePreKey {
   bytes  public_key = 2;  // X25519 pubkey, 32 bytes
 }
 
-// Sent via Nym from requester to provider to request a prekey bundle
-message PreKeyRequest {
-  bytes reply_nym_address = 1;  // Nym address to send the PreKeyBundle response to
+// Used as the HTTP request body for POST /api/v1/deliver between providers.
+message DeliverRequest {
+  bytes mailbox_addr    = 1;  // 32-byte target mailbox address
+  bytes sealed_envelope = 2;  // serialised SealedEnvelope proto bytes
 }
 ```
 
@@ -245,15 +254,15 @@ syntax = "proto3";
 package evanescent.v1;
 
 message MessageHeader {
-  bytes  dh_ratchet_key    = 1;  // X25519 pubkey, 32 bytes (sender's current ratchet key)
-  uint32 previous_counter  = 2;  // PN: messages in previous chain
-  uint32 message_counter   = 3;  // N: message number in current chain
+  bytes  dh_ratchet_key   = 1;  // X25519 pubkey, 32 bytes (sender's current ratchet key)
+  uint32 previous_counter = 2;  // PN: messages in previous chain
+  uint32 message_counter  = 3;  // N: message number in current chain
 }
 
 // A complete Double Ratchet encrypted message
 message DrMessage {
-  bytes message_header     = 1;  // serialised MessageHeader (used as AAD for AEAD)
-  bytes ciphertext         = 2;  // ChaCha20-Poly1305 ciphertext || 16-byte tag
+  bytes message_header = 1;  // serialised MessageHeader (used as AAD for AEAD)
+  bytes ciphertext     = 2;  // ChaCha20-Poly1305 ciphertext || 16-byte tag
 }
 
 // Application-level message content (plaintext before Double Ratchet encryption)
@@ -270,7 +279,7 @@ message MessageContent {
 syntax = "proto3";
 package evanescent.v1;
 
-// Outer envelope: stored by provider, routed via Nym
+// Outer envelope: stored by provider, routed to recipient.
 // Provider cannot decrypt this.
 message SealedEnvelope {
   bytes ephemeral_key = 1;  // X25519 pubkey, 32 bytes (EPK_pub)
@@ -278,10 +287,11 @@ message SealedEnvelope {
   bytes ciphertext    = 3;  // encrypted SealedSenderContent || 16-byte Poly1305 tag
 }
 
-// Inner content: decrypted by recipient's device only
+// Inner content: decrypted by recipient's device only.
 message SealedSenderContent {
   bytes  sender_identity_key = 1;  // Ed25519 pubkey, 32 bytes
-  string sender_nym_address  = 2;  // sender provider's Nym address (for reply routing)
+  reserved 2;                       // was sender_nym_address
+  reserved "sender_nym_address";
   bytes  dr_message          = 3;  // serialised DrMessage proto bytes
 }
 ```
@@ -292,40 +302,42 @@ message SealedSenderContent {
 syntax = "proto3";
 package evanescent.v1;
 
-// Shared out-of-band (QR code, secure link) to add a contact
+// Shared out-of-band (QR code, secure link) to add a contact.
 message ContactBundle {
-  bytes  identity_key    = 1;  // Ed25519 pubkey, 32 bytes
-  string nym_address     = 2;  // provider's Nym address
-  string provider_onion  = 3;  // provider's .onion address (with .onion suffix)
-  uint32 version         = 4;  // bundle format version; currently 1
+  bytes  identity_key   = 1;  // Ed25519 pubkey, 32 bytes
+  reserved 2;                  // was nym_address
+  reserved "nym_address";
+  string provider_onion = 3;  // provider's .onion address (with .onion suffix)
+  uint32 version        = 4;  // bundle format version; currently 2
+  bytes  mailbox_addr   = 5;  // BLAKE3(identity_key)[0:32], 32 bytes
 }
 ```
 
 ### state.proto — Double Ratchet Local State
 
-**Never transmitted.** Stored in SQLCipher only.
+**Never transmitted.** Stored in SQLCipher on Android only.
 
 ```protobuf
 syntax = "proto3";
 package evanescent.v1;
 
 message RatchetState {
-  bytes  dh_self_public    = 1;   // Current DH ratchet keypair (public), X25519, 32 bytes
-  bytes  dh_self_private   = 2;   // Current DH ratchet keypair (private), X25519, 32 bytes
-  bytes  dh_remote_public  = 3;   // Remote's current ratchet public key, 32 bytes
-  bytes  root_key          = 4;   // Current root key, 32 bytes
-  bytes  chain_key_send    = 5;   // Sending chain key, 32 bytes
-  bytes  chain_key_recv    = 6;   // Receiving chain key, 32 bytes
-  uint32 send_count        = 7;   // N_s: messages sent in current chain
-  uint32 recv_count        = 8;   // N_r: messages received in current chain
-  uint32 prev_send_count   = 9;   // PN: messages in previous sending chain
+  bytes  dh_self_public   = 1;  // Current DH ratchet keypair (public), X25519, 32 bytes
+  bytes  dh_self_private  = 2;  // Current DH ratchet keypair (private), X25519, 32 bytes
+  bytes  dh_remote_public = 3;  // Remote's current ratchet public key, 32 bytes
+  bytes  root_key         = 4;  // Current root key, 32 bytes
+  bytes  chain_key_send   = 5;  // Sending chain key, 32 bytes
+  bytes  chain_key_recv   = 6;  // Receiving chain key, 32 bytes
+  uint32 send_count       = 7;  // N_s: messages sent in current chain
+  uint32 recv_count       = 8;  // N_r: messages received in current chain
+  uint32 prev_send_count  = 9;  // PN: messages in previous sending chain
   repeated SkippedKey skipped_keys = 10;
 }
 
 message SkippedKey {
-  bytes  dh_public         = 1;   // Ratchet public key this skip key belongs to
-  uint32 message_counter   = 2;   // Message counter for this skip key
-  bytes  message_key       = 3;   // The skip key itself, 32 bytes
+  bytes  dh_public       = 1;  // Ratchet public key this skip key belongs to
+  uint32 message_counter = 2;  // Message counter for this skip key
+  bytes  message_key     = 3;  // The skip key itself, 32 bytes
 }
 ```
 
@@ -333,10 +345,10 @@ message SkippedKey {
 
 ## Adding New Messages
 
-1. Add the message definition to the appropriate `.proto` file
-2. Run generation commands (Go and Kotlin)
-3. Commit generated files alongside the `.proto` change in the same commit
-4. Update this README if adding a new `.proto` file
-5. Update `docs/standards.md` if the new message affects a protocol boundary
+1. Add the message definition to the appropriate `.proto` file.
+2. Regenerate Rust and Android code (prost-build runs automatically on `cargo build`; Gradle handles Android).
+3. Commit generated files alongside the `.proto` change in the same commit.
+4. Update this README if adding a new `.proto` file or a message that crosses a component boundary.
+5. Update `docs/standards.md` if the new message affects a protocol boundary.
 
-Never add a message that crosses a component boundary (Android ↔ Provider, or Provider ↔ Provider via Nym) without a corresponding entry in this README and in `docs/standards.md`.
+Never add a message that crosses a component boundary (Android ↔ Provider, or Provider ↔ Provider via HTTP) without a corresponding entry in this README and in `docs/standards.md`.

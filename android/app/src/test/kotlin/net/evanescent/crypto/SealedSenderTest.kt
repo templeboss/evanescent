@@ -25,19 +25,16 @@ class SealedSenderTest {
         val (bobPriv, bobPub) = generateEd25519KeyPair()
 
         val drMessage = "Hello, Bob!".toByteArray(Charsets.UTF_8)
-        val senderNymAddr = "alice@gateway1"
 
         val envelope = SealedSender.seal(
             drMessageBytes = drMessage,
             recipientIdentityKey = bobPub,
-            senderIdentityKey = alicePub,
-            senderNymAddress = senderNymAddr
+            senderIdentityKey = alicePub
         )
 
-        val (senderKey, nymAddr, decrypted) = SealedSender.unseal(envelope, bobPriv)
+        val (senderKey, decrypted) = SealedSender.unseal(envelope, bobPriv)
 
         assertArrayEquals("Sender identity key must match", alicePub, senderKey)
-        assertEquals("Nym address must match", senderNymAddr, nymAddr)
         assertArrayEquals("Decrypted content must match", drMessage, decrypted)
     }
 
@@ -49,8 +46,7 @@ class SealedSenderTest {
         val envelope = SealedSender.seal(
             drMessageBytes = "test".toByteArray(),
             recipientIdentityKey = bobPub,
-            senderIdentityKey = alicePub,
-            senderNymAddress = "test@gw"
+            senderIdentityKey = alicePub
         )
 
         // Flip a byte in the ciphertext region.
@@ -69,8 +65,7 @@ class SealedSenderTest {
         val envelope = SealedSender.seal(
             drMessageBytes = "secret".toByteArray(),
             recipientIdentityKey = bobPub,
-            senderIdentityKey = alicePub,
-            senderNymAddress = "test@gw"
+            senderIdentityKey = alicePub
         )
 
         SealedSender.unseal(envelope, evePriv) // Wrong key — must fail

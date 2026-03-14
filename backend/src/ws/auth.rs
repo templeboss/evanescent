@@ -31,7 +31,6 @@ pub async fn verify_response(
     identity_key: &[u8],
     signature: &[u8],
     mailbox_store: &MailboxStore,
-    provider_nym_addr: &str,
     provider_onion_addr: &str,
 ) -> Result<Vec<Vec<u8>>> {
     let nonce = match sess.nonce.take() {
@@ -64,7 +63,6 @@ pub async fn verify_response(
     };
     let provider_info = WsServerMessage {
         body: Some(ws_server_message::Body::ProviderInfo(ProviderInfo {
-            nym_address: provider_nym_addr.to_string(),
             onion_address: provider_onion_addr.to_string(),
             mailbox_addr: mailbox_addr_bytes,
         })),

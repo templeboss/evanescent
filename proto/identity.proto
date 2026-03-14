@@ -3,10 +3,12 @@ package evanescent.v1;
 
 option go_package = "github.com/evanescent/evanescent/backend/internal/proto";
 
-// Shared out-of-band (QR code, secure link) to add a contact
+// Shared out-of-band (QR code, secure link) to add a contact.
 message ContactBundle {
   bytes  identity_key   = 1;  // Ed25519 pubkey, 32 bytes
-  string nym_address    = 2;  // provider's Nym address
+  reserved 2;                  // was nym_address
+  reserved "nym_address";
   string provider_onion = 3;  // provider's .onion address (with .onion suffix)
-  uint32 version        = 4;  // bundle format version; currently 1
+  uint32 version        = 4;  // bundle format version; currently 2
+  bytes  mailbox_addr   = 5;  // BLAKE3(identity_key)[0:32], 32 bytes
 }

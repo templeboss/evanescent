@@ -5,9 +5,9 @@ pub mod session;
 
 use crate::{
     mailbox::MailboxStore,
-    nym_client::NymHandle,
     prekeys::PrekeyStore,
-    proto::{ws_client_message, WsClientMessage},
+    proto::{ws_client_message, DeliverRequest, PreKeyBundle, WsClientMessage},
+    relay::RelayClient,
     ws::{auth as auth_mod, errors::*, session::Session},
 };
 use axum::{
@@ -32,13 +32,15 @@ const OUTBOUND_QUEUE: usize = 100;
 pub struct AppState {
     pub mailbox: MailboxStore,
     pub prekeys: PrekeyStore,
-    pub nym: Arc<NymHandle>,
+    pub relay: Arc<RelayClient>,
     pub onion_addr: String,
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
+        .route("/api/v1/deliver", axum::routing::post(deliver_handler))
+        .route("/api/v1/prekeys/:mailbox_addr", axum::routing::get(prekeys_handler))
         .with_state(state)
 }
 
@@ -116,7 +118,6 @@ async fn dispatch(
                 &resp.identity_key,
                 &resp.signature,
                 &state.mailbox,
-                &state.nym.nym_addr,
                 &state.onion_addr,
             )
             .await
@@ -138,14 +139,87 @@ async fn dispatch(
                     handler::handle_fetch(sess, req, &state.mailbox).await
                 }
                 Some(Body::SendMessage(req)) => {
-                    handler::handle_send(sess, req, &*state.nym).await
+                    handler::handle_send(sess, req, &state.relay).await
                 }
                 Some(Body::UploadPreKeys(req)) => {
                     handler::handle_upload_prekeys(sess, req, &state.prekeys).await
+                }
+                Some(Body::GetPreKeys(req)) => {
+                    handler::handle_get_prekeys(sess, req, &state.relay).await
                 }
                 Some(Body::Ping(_)) => handler::handle_ping(),
                 _ => vec![],
             }
         }
     }
+}
+
+async fn deliver_handler(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> impl axum::response::IntoResponse {
+    use axum::http::StatusCode;
+    use uuid::Uuid;
+
+    let req = match DeliverRequest::decode(body) {
+        Ok(r) => r,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if req.mailbox_addr.len() != 32 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let mailbox_addr = hex::encode(&req.mailbox_addr);
+    let id = Uuid::new_v4().to_string();
+    match state.mailbox.store_message(&id, &mailbox_addr, &req.sealed_envelope).await {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => {
+            tracing::error!("deliver: store_message: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn prekeys_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(mailbox_addr_hex): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    use axum::http::StatusCode;
+
+    if mailbox_addr_hex.len() != 64 || !mailbox_addr_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let spk = match state.prekeys.active_signed_prekey(&mailbox_addr_hex).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("prekeys: active_signed_prekey: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let identity_key = match state.mailbox.identity_key_for(&mailbox_addr_hex).await {
+        Ok(Some(k)) => k,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("prekeys: identity_key_for: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let opk = state.prekeys.pop_one_time_prekey(&mailbox_addr_hex).await.ok().flatten();
+    let bundle = PreKeyBundle {
+        identity_key,
+        signed_prekey_id: spk.prekey_id,
+        signed_prekey: spk.public_key,
+        signed_prekey_sig: spk.signature,
+        one_time_prekey_id: opk.as_ref().map(|o| o.prekey_id).unwrap_or(0),
+        one_time_prekey: opk.map(|o| o.public_key).unwrap_or_default(),
+    };
+
+    (
+        StatusCode::OK,
+        [("content-type", "application/x-protobuf")],
+        bundle.encode_to_vec(),
+    ).into_response()
 }

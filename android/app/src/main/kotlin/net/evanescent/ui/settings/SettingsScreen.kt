@@ -16,8 +16,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import net.evanescent.App
-import net.evanescent.provider.OrbotHelper
 import net.evanescent.provider.ProviderService
+import net.evanescent.provider.TorManager
 import net.evanescent.util.toHex
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -67,7 +67,7 @@ fun SettingsScreen(
                 label = { Text("Provider .onion address") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                isError = onionAddress.isNotEmpty() && !OrbotHelper.isValidOnionAddress(onionAddress)
+                isError = onionAddress.isNotEmpty() && !TorManager.isValidOnionAddress(onionAddress)
             )
             Spacer(Modifier.height(8.dp))
             Button(
@@ -75,14 +75,14 @@ fun SettingsScreen(
                     viewModel.saveOnionAddress(onionAddress)
                     ProviderService.start(app, onionAddress)
                 },
-                enabled = OrbotHelper.isValidOnionAddress(onionAddress)
+                enabled = TorManager.isValidOnionAddress(onionAddress)
             ) {
                 Text("Connect to Provider")
             }
 
-            // Show Contact Bundle section once provider Nym address is known.
-            val nymAddr = app.providerNymAddr
-            if (nymAddr.isNotEmpty() && OrbotHelper.isValidOnionAddress(onionAddress)) {
+            // Show Contact Bundle section once connected and onion address is valid.
+            val myMailboxAddr = app.myMailboxAddr
+            if (myMailboxAddr.size == 32 && TorManager.isValidOnionAddress(onionAddress)) {
                 Spacer(Modifier.height(24.dp))
                 Text("Contact Bundle", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(4.dp))
@@ -93,7 +93,7 @@ fun SettingsScreen(
                 Spacer(Modifier.height(8.dp))
                 Button(
                     onClick = {
-                        val bundle = viewModel.buildContactBundle(app.identityPub, nymAddr, onionAddress)
+                        val bundle = viewModel.buildContactBundle(app.identityPub, myMailboxAddr, onionAddress)
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("Contact Bundle", bundle))
                         bundleCopied = true
@@ -122,18 +122,18 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Encode a ContactBundle proto (minimal hand-rolled encoding):
-     *   field 1 (bytes): identity_key
-     *   field 2 (string): nym_address
-     *   field 3 (string): provider_onion
-     *   field 4 (varint): version = 1
+     *   field 1 (bytes):   identity_key
+     *   field 2:           RESERVED (nym_address removed — omitted)
+     *   field 3 (string):  provider_onion
+     *   field 4 (varint):  version = 2
+     *   field 5 (bytes):   mailbox_addr (32 bytes)
      */
-    fun buildContactBundle(identityKey: ByteArray, nymAddress: String, onionAddress: String): String {
-        val nymBytes = nymAddress.toByteArray(Charsets.UTF_8)
+    fun buildContactBundle(identityKey: ByteArray, mailboxAddr: ByteArray, onionAddress: String): String {
         val onionBytes = onionAddress.toByteArray(Charsets.UTF_8)
         val payload = encodeBytes(1, identityKey) +
-            encodeBytes(2, nymBytes) +
             encodeBytes(3, onionBytes) +
-            encodeTag(4, 0) + encodeVarint(1L)  // version = 1
+            encodeTag(4, 0) + encodeVarint(2L) +  // version = 2
+            encodeBytes(5, mailboxAddr)
         return Base64.encodeToString(payload, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
     }
 

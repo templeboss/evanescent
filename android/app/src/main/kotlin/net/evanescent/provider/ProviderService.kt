@@ -32,16 +32,20 @@ class ProviderService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val onionAddress = intent?.getStringExtra(EXTRA_ONION_ADDRESS) ?: return START_NOT_STICKY
 
-        if (!OrbotHelper.isOrbotInstalled(this)) {
-            Log.e(TAG, "Orbot not installed — cannot start provider connection")
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        OrbotHelper.requestOrbotStart(this)
-
         scope.launch {
-            delay(3_000) // Give Orbot time to start.
+            // Wait for the embedded Tor daemon to be ready before connecting.
+            if (!TorManager.isReady()) {
+                Log.d(TAG, "Waiting for Tor bootstrap before connecting to provider…")
+                var waited = 0
+                while (!TorManager.isReady() && waited < 90_000) {
+                    delay(1_000)
+                    waited += 1_000
+                }
+                if (!TorManager.isReady()) {
+                    Log.e(TAG, "Tor did not bootstrap in time — aborting provider connection")
+                    return@launch
+                }
+            }
             val app = applicationContext as App
             app.providerClient.connect(onionAddress)
         }

@@ -1,18 +1,19 @@
 use crate::{
     crypto::verify_spk,
     mailbox::MailboxStore,
-    nym_client::{NymHandle, PREFIX_MAILBOX_MSG, PREFIX_PREKEY_REQUEST, ROUTING_TAG_LEN},
     prekeys::PrekeyStore,
     proto::{
-        ws_server_message, Error, FetchMessages, Messages, Pong, SendAck, SendMessage,
-        StoredMessage, UploadPreKeys, WsServerMessage,
+        ws_server_message, Error, FetchMessages, GetPreKeys, Messages, Pong, PreKeys, SendAck,
+        SendMessage, StoredMessage, UploadPreKeys, WsServerMessage,
     },
+    relay::RelayClient,
     ws::{errors::*, session::Session},
 };
 use prost::Message as ProstMessage;
 use tracing::{error, warn};
 
 const MAX_MESSAGE_BYTES: usize = 32 * 1024;
+const ROUTING_TAG_LEN: usize = 32;
 
 pub async fn handle_fetch(
     sess: &Session,
@@ -53,7 +54,11 @@ pub async fn handle_fetch(
     vec![reply.encode_to_vec()]
 }
 
-pub async fn handle_send(sess: &mut Session, req: SendMessage, nym: &NymHandle) -> Vec<Vec<u8>> {
+pub async fn handle_send(
+    sess: &mut Session,
+    req: SendMessage,
+    relay: &RelayClient,
+) -> Vec<Vec<u8>> {
     if !sess.check_send_rate() {
         let reply = WsServerMessage {
             body: Some(ws_server_message::Body::SendAck(SendAck {
@@ -76,7 +81,6 @@ pub async fn handle_send(sess: &mut Session, req: SendMessage, nym: &NymHandle) 
         return vec![reply.encode_to_vec()];
     }
 
-    // The to_mailbox_addr must be exactly 32 bytes — the raw BLAKE3 routing tag.
     if req.to_mailbox_addr.len() != ROUTING_TAG_LEN {
         let reply = WsServerMessage {
             body: Some(ws_server_message::Body::SendAck(SendAck {
@@ -87,22 +91,25 @@ pub async fn handle_send(sess: &mut Session, req: SendMessage, nym: &NymHandle) 
         };
         return vec![reply.encode_to_vec()];
     }
-    let mut routing_tag = [0u8; ROUTING_TAG_LEN];
-    routing_tag.copy_from_slice(&req.to_mailbox_addr);
 
-    let nym_prefix = if req.nym_prefix == PREFIX_PREKEY_REQUEST as u32 {
-        PREFIX_PREKEY_REQUEST
-    } else {
-        PREFIX_MAILBOX_MSG
-    };
+    if req.to_provider_onion.is_empty() {
+        let reply = WsServerMessage {
+            body: Some(ws_server_message::Body::SendAck(SendAck {
+                correlation_id: req.correlation_id,
+                ok: false,
+                error_code: ERR_INVALID_MESSAGE.to_string(),
+            })),
+        };
+        return vec![reply.encode_to_vec()];
+    }
 
-    let (ok, error_code) = match nym
-        .send_routed(&req.to_nym_address, nym_prefix, &routing_tag, &req.sealed_envelope)
+    let (ok, error_code) = match relay
+        .deliver_message(&req.to_provider_onion, &req.to_mailbox_addr, &req.sealed_envelope)
         .await
     {
         Ok(_) => (true, String::new()),
         Err(e) => {
-            warn!("handler: send via nym failed: {e}");
+            warn!("handler: deliver via relay failed: {e}");
             (false, ERR_INTERNAL.to_string())
         }
     };
@@ -111,6 +118,48 @@ pub async fn handle_send(sess: &mut Session, req: SendMessage, nym: &NymHandle) 
         body: Some(ws_server_message::Body::SendAck(SendAck {
             correlation_id: req.correlation_id,
             ok,
+            error_code,
+        })),
+    };
+    vec![reply.encode_to_vec()]
+}
+
+pub async fn handle_get_prekeys(
+    sess: &Session,
+    req: GetPreKeys,
+    relay: &RelayClient,
+) -> Vec<Vec<u8>> {
+    if sess.mailbox_addr().is_none() {
+        return vec![error_frame(ERR_AUTH_REQUIRED)];
+    }
+
+    if req.provider_onion.is_empty() || req.mailbox_addr.len() != 32 {
+        let reply = WsServerMessage {
+            body: Some(ws_server_message::Body::PreKeys(PreKeys {
+                correlation_id: req.correlation_id,
+                bundle: None,
+                error_code: ERR_INVALID_MESSAGE.to_string(),
+            })),
+        };
+        return vec![reply.encode_to_vec()];
+    }
+
+    let mailbox_addr_hex = hex::encode(&req.mailbox_addr);
+    let (bundle, error_code) = match relay
+        .fetch_prekeys(&req.provider_onion, &mailbox_addr_hex)
+        .await
+    {
+        Ok(b) => (Some(b), String::new()),
+        Err(e) => {
+            warn!("get_prekeys: fetch failed from {}: {e}", req.provider_onion);
+            (None, ERR_INTERNAL.to_string())
+        }
+    };
+
+    let reply = WsServerMessage {
+        body: Some(ws_server_message::Body::PreKeys(PreKeys {
+            correlation_id: req.correlation_id,
+            bundle,
             error_code,
         })),
     };

@@ -14,6 +14,7 @@ message WsClientMessage {
     FetchMessages        fetch_messages         = 4;
     SendMessage          send_message           = 5;
     Ping                 ping                   = 6;
+    GetPreKeys           get_pre_keys           = 7;
   }
 }
 
@@ -27,6 +28,7 @@ message WsServerMessage {
     Pong          pong           = 5;
     Error         error          = 6;
     ProviderInfo  provider_info  = 7;
+    PreKeys       pre_keys       = 8;
   }
 }
 
@@ -55,11 +57,21 @@ message FetchMessages {
 }
 
 message SendMessage {
-  string correlation_id  = 1;  // UUID v4, for matching SendAck
-  string to_nym_address  = 2;  // recipient provider's Nym address
-  bytes  sealed_envelope = 3;  // payload bytes (SealedEnvelope or PreKeyRequest proto)
-  bytes  to_mailbox_addr = 4;  // target mailbox address, 32 raw bytes (BLAKE3 of their IK)
-  uint32 nym_prefix      = 5;  // Nym routing prefix: 0x01=PreKeyRequest, 0x05=mailbox msg (default)
+  string correlation_id    = 1;  // UUID v4, for matching SendAck
+  reserved 2;                    // was to_nym_address
+  reserved "to_nym_address";
+  bytes  sealed_envelope   = 3;  // serialised SealedEnvelope proto bytes
+  bytes  to_mailbox_addr   = 4;  // target mailbox address, 32 raw bytes (BLAKE3 of their IK)
+  reserved 5;                    // was nym_prefix
+  reserved "nym_prefix";
+  string to_provider_onion = 6;  // recipient provider's .onion address
+}
+
+// Request a prekey bundle from another provider on the client's behalf.
+message GetPreKeys {
+  string provider_onion = 1;  // .onion address of the target provider
+  bytes  mailbox_addr   = 2;  // 32-byte mailbox address of the target user
+  string correlation_id = 3;  // UUID v4, for matching PreKeys response
 }
 
 message Messages {
@@ -75,7 +87,14 @@ message StoredMessage {
 message SendAck {
   string correlation_id = 1;
   bool   ok             = 2;
-  string error_code     = 3;  // present only if !ok; see standards.md §14 for valid values
+  string error_code     = 3;  // present only if !ok
+}
+
+// Response to GetPreKeys.
+message PreKeys {
+  string       correlation_id = 1;
+  PreKeyBundle bundle         = 2;  // absent on error
+  string       error_code     = 3;  // present only on error
 }
 
 message Ping {}
@@ -86,9 +105,10 @@ message Error {
   string message = 2;
 }
 
-// Sent once immediately after AuthOk so the Android client knows where to direct Nym messages.
+// Sent once immediately after AuthOk so the Android client knows its mailbox address and provider info.
 message ProviderInfo {
-  string nym_address   = 1;  // provider's Nym address
+  reserved 1;                  // was nym_address
+  reserved "nym_address";
   string onion_address = 2;  // provider's .onion address (v3)
   bytes  mailbox_addr  = 3;  // this client's mailbox address, 32 raw bytes (BLAKE3 of IK)
 }

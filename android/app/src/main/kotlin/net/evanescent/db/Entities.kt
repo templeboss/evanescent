@@ -9,7 +9,7 @@ data class ContactEntity(
     @PrimaryKey
     @ColumnInfo(name = "identity_key", typeAffinity = androidx.room.ColumnInfo.BLOB)
     val identityKey: ByteArray,
-    @ColumnInfo(name = "nym_address") val nymAddress: String,
+    @ColumnInfo(name = "nym_address") val nymAddress: String = "",  // RESERVED — no longer used; kept for DB schema compatibility
     @ColumnInfo(name = "provider_onion") val providerOnion: String,
     val alias: String,
     val verified: Int = 0,  // 0 = false, 1 = true

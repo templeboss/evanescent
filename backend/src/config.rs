@@ -5,8 +5,6 @@ use std::fs;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(default)]
-    pub nym: NymConfig,
-    #[serde(default)]
     pub tor: TorConfig,
     #[serde(default)]
     pub storage: StorageConfig,
@@ -15,25 +13,11 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct NymConfig {
-    pub data_dir: String,
-    pub gateway: Option<String>,
-}
-
-impl Default for NymConfig {
-    fn default() -> Self {
-        Self {
-            data_dir: "/var/lib/evanescent/nym".into(),
-            gateway: None,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
 pub struct TorConfig {
     pub control_port: u16,
     pub ws_port: u16,
     pub hidden_service_port: u16,
+    pub socks_port: u16,
 }
 
 impl Default for TorConfig {
@@ -42,6 +26,7 @@ impl Default for TorConfig {
             control_port: 9051,
             ws_port: 8765,
             hidden_service_port: 443,
+            socks_port: 9050,
         }
     }
 }
@@ -87,7 +72,6 @@ pub fn load(path: Option<&str>) -> Result<Config> {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            nym: Default::default(),
             tor: Default::default(),
             storage: Default::default(),
             logging: Default::default(),

@@ -9,8 +9,13 @@ import net.evanescent.db.MessageEntity
 import net.evanescent.db.SessionEntity
 import net.evanescent.model.MessageDirection
 import net.evanescent.model.MessageStatus
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import net.evanescent.provider.PreKeyUploader
 import net.evanescent.provider.ProviderClient
+import net.evanescent.provider.TorManager
 import java.util.UUID
 
 private const val TAG = "Evanescent"
@@ -34,10 +39,6 @@ class App : Application() {
         private set
 
     lateinit var identityPriv: ByteArray
-        private set
-
-    /** Provider's Nym address — delivered via ProviderInfo WS message after auth. */
-    @Volatile var providerNymAddr: String = ""
         private set
 
     /** Provider's .onion address — delivered via ProviderInfo WS message after auth. */
@@ -87,11 +88,10 @@ class App : Application() {
             onEnvelopeReceived = { id, envelope ->
                 handleIncomingEnvelope(id, envelope)
             },
-            onProviderInfo = { nymAddr, onionAddr, mailboxAddr ->
-                providerNymAddr = nymAddr
+            onProviderInfo = { onionAddr, mailboxAddr ->
                 providerOnionAddr = onionAddr
                 myMailboxAddr = mailboxAddr
-                Log.d(TAG, "Provider Nym address: $nymAddr")
+                Log.d(TAG, "Provider onion address: $onionAddr")
             },
             onAuthenticated = {
                 try {
@@ -101,6 +101,16 @@ class App : Application() {
                 }
             }
         )
+
+        // Start embedded Tor daemon.
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            try {
+                TorManager.start(applicationContext)
+                Log.d(TAG, "Tor bootstrapped on port ${TorManager.socksPort}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Tor failed to start: ${e.message}")
+            }
+        }
     }
 
     private suspend fun handleIncomingEnvelope(id: String, envelope: ByteArray) {
@@ -118,7 +128,7 @@ class App : Application() {
 
         // Regular sealed sender envelope.
         try {
-            val (senderIdentityKey, senderNymAddr, drMsgBytes) =
+            val (senderIdentityKey, drMsgBytes) =
                 SealedSender.unseal(envelope, identityPriv)
 
             val contact = database.contactDao().getByKey(senderIdentityKey) ?: run {

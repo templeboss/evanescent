@@ -4,9 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Nym — native SDK, no subprocess
-nym-sdk = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v2026.4-quark" }
-
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
@@ -15,8 +12,11 @@ axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
 futures = "0.3"
 
-# SQLite — use the same sqlx that nym-sdk pulls in (avoids libsqlite3-sys links conflict)
+# SQLite
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-native-tls"] }
+
+# Outbound HTTP via Tor SOCKS5
+reqwest = { version = "0.12", default-features = false, features = ["json", "socks"] }
 
 # Proto serialization (generated from proto/*.proto)
 prost = "0.12"

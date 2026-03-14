@@ -25,14 +25,12 @@ object SealedSender {
      * @param drMessageBytes      Serialised DrMessage bytes
      * @param recipientIdentityKey  Recipient's Ed25519 public key (32 bytes)
      * @param senderIdentityKey   Sender's Ed25519 public key (32 bytes)
-     * @param senderNymAddress    Sender provider's Nym address
      * @return Serialised SealedEnvelope bytes
      */
     fun seal(
         drMessageBytes: ByteArray,
         recipientIdentityKey: ByteArray,
-        senderIdentityKey: ByteArray,
-        senderNymAddress: String
+        senderIdentityKey: ByteArray
     ): ByteArray {
         // Generate ephemeral X25519 keypair.
         val epkPriv = X25519PrivateKeyParameters(SecureRandom())
@@ -47,7 +45,7 @@ object SealedSender {
         val encKey = derived.copyOfRange(0, 32)
 
         // Build inner plaintext.
-        val content = serializeSealedSenderContent(senderIdentityKey, senderNymAddress, drMessageBytes)
+        val content = serializeSealedSenderContent(senderIdentityKey, drMessageBytes)
 
         // Encrypt.
         val nonce = ByteArray(12).also { SecureRandom().nextBytes(it) }
@@ -64,7 +62,7 @@ object SealedSender {
      * @param recipientIdentityPriv Recipient's Ed25519 private key seed (32 bytes)
      * @return Pair(senderIdentityKey, drMessageBytes), or throws on decryption failure
      */
-    fun unseal(envelopeBytes: ByteArray, recipientIdentityPriv: ByteArray): Triple<ByteArray, String, ByteArray> {
+    fun unseal(envelopeBytes: ByteArray, recipientIdentityPriv: ByteArray): Pair<ByteArray, ByteArray> {
         val (epkPub, nonce, ciphertext) = deserializeSealedEnvelope(envelopeBytes)
 
         // ECDH with recipient's identity key.
@@ -92,16 +90,13 @@ object SealedSender {
 
     private fun serializeSealedSenderContent(
         senderIdentityKey: ByteArray,
-        senderNymAddress: String,
         drMessage: ByteArray
     ): ByteArray {
-        val addrBytes = senderNymAddress.toByteArray(Charsets.UTF_8)
-        val buf = ByteArray(32 + 2 + addrBytes.size + 4 + drMessage.size)
+        // Wire format: [sender_identity_key(32)][dr_message_len(4)][dr_message]
+        // field 2 (nym_address) is RESERVED and omitted.
+        val buf = ByteArray(32 + 4 + drMessage.size)
         var pos = 0
         System.arraycopy(senderIdentityKey, 0, buf, pos, 32); pos += 32
-        buf[pos++] = (addrBytes.size ushr 8).toByte()
-        buf[pos++] = addrBytes.size.toByte()
-        System.arraycopy(addrBytes, 0, buf, pos, addrBytes.size); pos += addrBytes.size
         buf[pos++] = (drMessage.size ushr 24).toByte()
         buf[pos++] = (drMessage.size ushr 16).toByte()
         buf[pos++] = (drMessage.size ushr 8).toByte()
@@ -110,15 +105,14 @@ object SealedSender {
         return buf
     }
 
-    private fun deserializeSealedSenderContent(bytes: ByteArray): Triple<ByteArray, String, ByteArray> {
+    private fun deserializeSealedSenderContent(bytes: ByteArray): Pair<ByteArray, ByteArray> {
+        // Wire format: [sender_identity_key(32)][dr_message_len(4)][dr_message]
         var pos = 0
         val senderKey = bytes.copyOfRange(pos, pos + 32); pos += 32
-        val addrLen = (bytes[pos++].toInt() and 0xFF shl 8) or (bytes[pos++].toInt() and 0xFF)
-        val addr = String(bytes, pos, addrLen, Charsets.UTF_8); pos += addrLen
         val drLen = (bytes[pos++].toInt() and 0xFF shl 24) or (bytes[pos++].toInt() and 0xFF shl 16) or
             (bytes[pos++].toInt() and 0xFF shl 8) or (bytes[pos++].toInt() and 0xFF)
         val dr = bytes.copyOfRange(pos, pos + drLen)
-        return Triple(senderKey, addr, dr)
+        return Pair(senderKey, dr)
     }
 
     private fun serializeSealedEnvelope(epkPub: ByteArray, nonce: ByteArray, ciphertext: ByteArray): ByteArray {

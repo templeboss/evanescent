@@ -8,15 +8,15 @@ The Android app is the only user interface. It holds the user's identity keypair
 1. Generates and protects the user's Ed25519 identity keypair in Android Keystore (TEE)
 2. Performs X3DH key agreement and manages Double Ratchet sessions
 3. Constructs sealed sender envelopes — the provider never learns who sent a message
-4. Connects to the Personal Provider exclusively through Orbot (Tor SOCKS5 proxy)
+4. Connects to the provider exclusively via embedded Tor (no Orbot required)
 5. Stores all local data (messages, contacts, session state) in SQLCipher-encrypted SQLite
 6. Provides a minimal, functional UI
 
 **What the app does NOT do:**
-- It never connects to clearnet. Every network call goes through Orbot.
+- It never connects to clearnet. Every network call goes through Tor.
 - It never sends the identity private key anywhere, for any reason.
 - It never connects to Google services (no FCM, no Google Play Services dependency in the core).
-- It does not implement Nym or Tor — it uses the provider (for Nym) and Orbot (for Tor).
+- It does not implement any transport-layer cryptography — `.onion` connections are authenticated by the onion address itself.
 
 ---
 
@@ -32,7 +32,7 @@ The Android app is the only user interface. It holds the user's identity keypair
 | WebSocket | OkHttp | 4.x |
 | Database | SQLCipher + Room | See setup below |
 | Proto | `com.google.protobuf:protobuf-kotlin` | Code generated from `proto/` |
-| Tor | Orbot (external app) | SOCKS5 proxy on 127.0.0.1:9050 |
+| Tor | tor-android (embedded) | Bootstraps on app startup |
 | Crypto | Android Keystore + Bouncy Castle | See crypto section |
 | QR codes | ZXing | For ContactBundle scanning/display |
 | Build | Gradle (Kotlin DSL) | |
@@ -66,8 +66,8 @@ android/
           provider/
             ProviderClient.kt        WebSocket client. Handles connection lifecycle,
                                      authentication, send/receive dispatch.
-                                     All connections go through Orbot SOCKS5.
-            OrbotHelper.kt           Checks Orbot is installed and running. Requests start via Intent.
+                                     All connections go through the embedded Tor SOCKS5 port.
+            TorManager.kt            Embedded Tor lifecycle: start, bootstrap wait, dynamic SOCKS5 port.
             MessageQueue.kt          Outbound queue. Tracks correlation_id → SendAck mapping.
             PreKeyUploader.kt        Watches one-time prekey count; triggers upload when < 20.
             ProviderService.kt       Foreground Service. Maintains persistent WebSocket connection.
@@ -189,37 +189,31 @@ Use `org.bouncycastle.crypto.engines.ChaCha7539Engine` + `org.bouncycastle.crypt
 
 ---
 
-## Tor / Orbot Integration
+## Tor Integration
 
-All network connections go through Orbot. No exceptions.
+The app embeds Tor via the tor-android library. No external Orbot app is required.
 
+Dependency (`build.gradle.kts`):
 ```kotlin
-// In OrbotHelper.kt:
+implementation("info.guardianproject:tor-android:0.4.9.13")
+```
 
-// Check if Orbot is installed
-fun isOrbotInstalled(context: Context): Boolean {
-    return try {
-        context.packageManager.getPackageInfo("org.torproject.android", 0)
-        true
-    } catch (e: PackageManager.NameNotFoundException) { false }
-}
+`TorManager.kt`:
+- Starts the embedded Tor daemon on app launch
+- Waits for bootstrap (typically 5–15 seconds)
+- Exposes the dynamic SOCKS5 port after bootstrap
+- Provides a `ready()` suspend function that callers await before making connections
 
-// Request Orbot to start (sends intent; Orbot starts its SOCKS5 proxy)
-fun requestOrbotStart(context: Context) {
-    val intent = Intent("org.torproject.android.intent.action.REQUEST_START")
-    intent.setPackage("org.torproject.android")
-    context.startForegroundService(intent)
-}
-
-// SOCKS5 proxy for OkHttp
-val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 9050))
+OkHttp proxy setup:
+```kotlin
+val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", TorManager.socksPort))
 val client = OkHttpClient.Builder()
     .proxy(proxy)
     .connectTimeout(30, TimeUnit.SECONDS)
     .build()
 ```
 
-If Orbot is not installed, the app must show an explanation screen and link to F-Droid download. **Never fall back to direct connections.**
+If Tor fails to bootstrap, the app shows an error screen. **Never fall back to direct connections.**
 
 ### Network Security Config
 
@@ -236,19 +230,20 @@ If Orbot is not installed, the app must show an explanation screen and link to F
 </network-security-config>
 ```
 
-This blocks all clearnet HTTP. All connections go through Tor SOCKS5 to `.onion` addresses.
+This blocks all clearnet HTTP. All connections go through the embedded Tor SOCKS5 port to `.onion` addresses.
 
 ---
 
 ## Provider Connection
 
-The app maintains one persistent WebSocket connection to the provider via Orbot.
+The app maintains one persistent WebSocket connection to the provider via embedded Tor.
 
 ### Connection Lifecycle
 
 ```
 App launch
-  → Check Orbot running
+  → Start embedded Tor (TorManager)
+  → Await TorManager.ready()
   → Start ProviderService (foreground service)
     → Connect WebSocket to <onion_address>:443/ws via SOCKS5
     → Authenticate (challenge-response — see standards.md §7)
@@ -281,7 +276,7 @@ suspend fun send(contact: Contact, plaintext: String) {
     val drCiphertext = doubleRatchet.encrypt(session, plaintext.toByteArray())
     val envelope = sealedSender.seal(drCiphertext, contact.identityKey, myIdentityKey)
     val correlationId = UUID.randomUUID().toString()
-    providerClient.send(correlationId, contact.nymAddress, envelope)
+    providerClient.send(correlationId, contact.providerOnion, envelope)
     // await SendAck with matching correlationId
 }
 ```
@@ -344,13 +339,13 @@ Any crypto test that passes but produces output differing from published Signal 
 
 ### Integration Tests
 
-`ProviderClientTest.kt` runs against a local provider binary in test mode (no Nym, no Tor, plain WebSocket on localhost). The integration test binary is part of `backend/cmd/integration_test/`.
+`ProviderClientTest.kt` runs against a local provider binary in test mode (no Tor, plain WebSocket on localhost). The integration test binary is part of `backend/cmd/integration_test/`.
 
 ---
 
 ## What NOT to Do
 
-- Do not make any direct TCP/HTTP connection outside of Orbot SOCKS5
+- Do not make any direct TCP/HTTP connection outside of the embedded Tor SOCKS5 port
 - Do not use FCM or any Google push notification service
 - Do not store the identity private key in SharedPreferences or unencrypted files
 - Do not use `Math.random()` or `java.util.Random` for any cryptographic purpose — use `SecureRandom`
