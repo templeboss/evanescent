@@ -233,20 +233,7 @@ data class RatchetState(
     val recvCount: Int,
     val prevSendCount: Int,
     val skippedKeys: Map<SkippedKeyId, ByteArray>
-) {
-    fun copy(
-        dhSelfPublic: ByteArray = this.dhSelfPublic,
-        dhSelfPrivate: ByteArray = this.dhSelfPrivate,
-        dhRemotePublic: ByteArray = this.dhRemotePublic,
-        rootKey: ByteArray = this.rootKey,
-        chainKeySend: ByteArray = this.chainKeySend,
-        chainKeyRecv: ByteArray = this.chainKeyRecv,
-        sendCount: Int = this.sendCount,
-        recvCount: Int = this.recvCount,
-        prevSendCount: Int = this.prevSendCount,
-        skippedKeys: Map<SkippedKeyId, ByteArray> = this.skippedKeys
-    ) = RatchetState(dhSelfPublic, dhSelfPrivate, dhRemotePublic, rootKey, chainKeySend, chainKeyRecv, sendCount, recvCount, prevSendCount, skippedKeys)
-}
+)
 
 data class SkippedKeyId(val dhPublic: ByteArray, val messageCounter: Int) {
     override fun equals(other: Any?): Boolean {

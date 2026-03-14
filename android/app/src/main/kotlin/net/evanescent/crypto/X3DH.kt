@@ -6,6 +6,7 @@ import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
+import java.math.BigInteger
 import java.security.MessageDigest
 import java.security.SecureRandom
 
@@ -162,9 +163,23 @@ object X3DH {
      * Uses Bouncy Castle's internal conversion.
      */
     fun ed25519PubToX25519Pub(ed25519Pub: ByteArray): X25519PublicKeyParameters {
-        val edPub = Ed25519PublicKeyParameters(ed25519Pub, 0)
-        // Bouncy Castle provides this conversion.
-        return edPub.generatePublicKey() as X25519PublicKeyParameters
+        // Birational map: Ed25519 (Edwards) → X25519 (Montgomery)
+        // u = (1 + y) / (1 - y) mod p, where p = 2^255 - 19
+        val p = BigInteger.valueOf(2).pow(255).subtract(BigInteger.valueOf(19))
+        val edBytes = ed25519Pub.copyOf(32)
+        edBytes[31] = (edBytes[31].toInt() and 0x7F).toByte() // clear sign bit
+        // Ed25519 y is little-endian; BigInteger expects big-endian
+        val y = BigInteger(1, edBytes.reversedArray())
+        val one = BigInteger.ONE
+        val u = one.add(y).multiply(one.subtract(y).modInverse(p)).mod(p)
+        // Convert u to little-endian 32 bytes
+        val uBig = u.toByteArray() // big-endian, possibly with leading sign byte
+        val x25519Bytes = ByteArray(32)
+        val len = if (uBig[0] == 0.toByte()) uBig.size - 1 else uBig.size
+        for (i in 0 until minOf(len, 32)) {
+            x25519Bytes[i] = uBig[uBig.size - 1 - i]
+        }
+        return X25519PublicKeyParameters(x25519Bytes, 0)
     }
 }
 

@@ -5,7 +5,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import net.evanescent.App
 import net.evanescent.DR_TYPE_INITIAL
 import net.evanescent.DR_TYPE_REGULAR
@@ -55,17 +54,15 @@ class ConversationViewModel(
                 // Prepend DR message type byte.
                 val typedDrMsg = byteArrayOf(if (isInitial) DR_TYPE_INITIAL else DR_TYPE_REGULAR) + drMsgBytes
 
-                val senderNymAddr = appInstance.providerNymAddr  // set after ProviderInfo received
                 val envelopeBytes = SealedSender.seal(
                     drMessageBytes = typedDrMsg,
                     recipientIdentityKey = contactEntity.identityKey,
-                    senderIdentityKey = appInstance.identityPub,
-                    senderNymAddress = senderNymAddr
+                    senderIdentityKey = appInstance.identityPub
                 )
 
                 val toMailboxAddr = contactEntity.mailboxAddr
                     ?: throw IllegalStateException("Contact has no mailbox address — re-add this contact")
-                val errCode = appInstance.providerClient.send(contactEntity.nymAddress, toMailboxAddr, envelopeBytes)
+                val errCode = appInstance.providerClient.send(contactEntity.providerOnion, toMailboxAddr, envelopeBytes)
                 val ok = errCode == null
 
                 if (ok) {
@@ -123,9 +120,9 @@ class ConversationViewModel(
     }
 
     /**
-     * Fetch a PreKeyBundle from the contact's provider via Nym:
-     * 1. Send PreKeyRequest (prefix 0x01 + proto) through our provider via SendMessage.
-     * 2. Wait (up to 60 s) for the bundle to arrive in our mailbox.
+     * Fetch a PreKeyBundle from the contact's provider via GetPreKeys WS message:
+     * 1. Send GetPreKeys to our provider specifying contact's mailbox and provider onion.
+     * 2. Provider fetches from the contact's provider and returns the bundle directly.
      * 3. Verify SPK signature.
      * 4. Run X3DH.initiate().
      * 5. Return (X3DHResult, initial RatchetState).
@@ -133,39 +130,14 @@ class ConversationViewModel(
     private suspend fun establishSession(
         contact: ContactEntity
     ): Pair<X3DHInitResult, RatchetState> {
-        val myProviderNymAddr = appInstance.providerNymAddr
-        check(myProviderNymAddr.isNotEmpty()) {
-            "Provider Nym address not yet known — wait for connection"
-        }
-        val myMailboxAddr = appInstance.myMailboxAddr
-        check(myMailboxAddr.size == 32) { "My mailbox address not yet known — wait for connection" }
         val targetMailboxAddr = contact.mailboxAddr
             ?: throw IllegalStateException("Contact has no mailbox address — re-add this contact")
 
-        // Encode PreKeyRequest proto:
-        //   field 1 = reply_nym_address (our provider's Nym address)
-        //   field 2 = target_mailbox_addr (whose prekeys we want)
-        //   field 3 = reply_mailbox_addr (our mailbox — where to store the bundle response)
-        val protoBytes = encodeBytes(1, myProviderNymAddr.toByteArray(Charsets.UTF_8)) +
-            encodeBytes(2, targetMailboxAddr) +
-            encodeBytes(3, myMailboxAddr)
-
-        // Send via our provider with PREFIX_PREKEY_REQUEST (0x01) so the recipient's
-        // backend handles it as a prekey lookup, not as a mailbox message.
-        val sendErr = appInstance.providerClient.send(
-            toNymAddress = contact.nymAddress,
-            toMailboxAddr = targetMailboxAddr,
-            sealedEnvelope = protoBytes,
-            nymPrefix = 0x01
-        )
-        check(sendErr == null) { "Failed to send PreKeyRequest to ${contact.nymAddress}: $sendErr" }
-
-        // Wait for the PreKeyBundle to arrive in our mailbox (via App.prekeyBundleFlow).
-        val bundleBytes = withTimeoutOrNull(60_000L) {
-            appInstance.prekeyBundleFlow
-                .first { (key, _) -> key.contentEquals(contact.identityKey) }
-                .second
-        } ?: error("PreKeyBundle not received within 60 seconds")
+        // Request the PreKeyBundle via the new GetPreKeys WS message.
+        val bundleBytes = appInstance.providerClient.getPreKeys(
+            targetMailboxAddr = targetMailboxAddr,
+            targetProviderOnion = contact.providerOnion
+        ) ?: error("PreKeyBundle not received — provider timed out or contact has no prekeys")
 
         // Parse the bundle.
         val bundle = parsePreKeyBundle(bundleBytes)
@@ -205,7 +177,7 @@ class ConversationViewModel(
         val oneTimePrekey: ByteArray
     )
 
-    data class X3DHInitResult(
+    private data class X3DHInitResult(
         val ephemeralPublic: ByteArray,
         val bundle: ParsedBundle,
         val oneTimePrekeyId: Int
@@ -265,26 +237,6 @@ class ConversationViewModel(
     private fun intToBytes(v: Int) = byteArrayOf(
         (v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte()
     )
-
-    // ── Minimal proto encoding for PreKeyRequest ───────────────────────────
-
-    private fun encodeBytes(fieldNum: Int, data: ByteArray): ByteArray =
-        encodeTag(fieldNum, 2) + encodeVarint(data.size.toLong()) + data
-
-    private fun encodeTag(fieldNum: Int, wireType: Int): ByteArray =
-        encodeVarint(((fieldNum.toLong() shl 3) or wireType.toLong()))
-
-    private fun encodeVarint(v: Long): ByteArray {
-        val buf = mutableListOf<Byte>()
-        var rem = v
-        do {
-            var b = (rem and 0x7F).toByte()
-            rem = rem ushr 7
-            if (rem != 0L) b = (b.toInt() or 0x80).toByte()
-            buf.add(b)
-        } while (rem != 0L)
-        return buf.toByteArray()
-    }
 
     private fun readVarint(data: ByteArray, start: Int): Pair<Long, Int> {
         var result = 0L; var shift = 0; var pos = start

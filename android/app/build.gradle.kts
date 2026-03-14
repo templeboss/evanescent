@@ -74,6 +74,9 @@ dependencies {
     // OkHttp
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    // Embedded Tor
+    implementation("info.guardianproject:tor-android:0.4.8.16")
+
     // Protobuf (Kotlin lite)
     implementation("com.google.protobuf:protobuf-kotlin-lite:4.28.2")
 

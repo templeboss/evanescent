@@ -2,6 +2,7 @@ syntax = "proto3";
 package evanescent.v1;
 
 option go_package = "github.com/evanescent/evanescent/backend/internal/proto";
+option java_outer_classname = "MessagesProto";
 
 message MessageHeader {
   bytes  dh_ratchet_key   = 1;  // X25519 pubkey, 32 bytes (sender's current ratchet key)
